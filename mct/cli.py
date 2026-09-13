@@ -42,10 +42,18 @@ def cmd_track(args: argparse.Namespace) -> int:
     return 0
 
 
+def _given(**kwargs: object) -> dict[str, object]:
+    """未指定（None）のオプションを落とし、呼び出し先の既定値を活かす。"""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
 def cmd_viz_video(args: argparse.Namespace) -> int:
     from mct.viz import viz_video
 
-    viz_video(_video_path(args), args.date, args.camera, args.out)
+    viz_video(
+        _video_path(args), args.date, args.camera, args.out,
+        **_given(jump_threshold=args.jump_threshold),
+    )
     return 0
 
 
@@ -53,6 +61,23 @@ def cmd_viz_trajectory(args: argparse.Namespace) -> int:
     from mct.viz import viz_trajectory
 
     viz_trajectory(_video_path(args), args.date, args.camera, args.out)
+    return 0
+
+
+def cmd_viz_density(args: argparse.Namespace) -> int:
+    from mct.viz import viz_density
+
+    viz_density(
+        _video_path(args), args.date, args.camera, args.out,
+        **_given(bin_px=args.bin_px),
+    )
+    return 0
+
+
+def cmd_viz_endpoints(args: argparse.Namespace) -> int:
+    from mct.viz import viz_endpoints
+
+    viz_endpoints(_video_path(args), args.date, args.camera, args.out)
     return 0
 
 
@@ -98,13 +123,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_track.set_defaults(func=cmd_track)
 
-    p_viz_v = sub.add_parser("viz-video", help="追跡結果を重畳した動画を書き出す")
+    p_viz_v = sub.add_parser(
+        "viz-video", help="追跡結果を重畳した動画を書き出す（無人フレームは除外）"
+    )
     _add_common(p_viz_v, with_config=False)
+    # 既定値は mct.viz 側に持たせている。ここで default を書くと二重定義に
+    # なるので、未指定なら None のまま渡さない。
+    p_viz_v.add_argument(
+        "--jump-threshold", type=float,
+        help="足元点がこの px 以上跳んだら JUMP として赤枠にする (default: 150)",
+    )
     p_viz_v.set_defaults(func=cmd_viz_video)
 
     p_viz_t = sub.add_parser("viz-trajectory", help="足元点の軌跡図を書き出す")
     _add_common(p_viz_t, with_config=False)
     p_viz_t.set_defaults(func=cmd_viz_trajectory)
+
+    p_viz_d = sub.add_parser(
+        "viz-density", help="足元点の密度ヒートマップを書き出す（観測区間の外縁用）"
+    )
+    _add_common(p_viz_d, with_config=False)
+    p_viz_d.add_argument(
+        "--bin-px", type=int,
+        help="ヒストグラムのビン幅 [px] (default: 20)",
+    )
+    p_viz_d.set_defaults(func=cmd_viz_density)
+
+    p_viz_e = sub.add_parser(
+        "viz-endpoints", help="各トラックの始点・終点と進行方向を書き出す（遷移領域用）"
+    )
+    _add_common(p_viz_e, with_config=False)
+    p_viz_e.set_defaults(func=cmd_viz_endpoints)
 
     return parser
 

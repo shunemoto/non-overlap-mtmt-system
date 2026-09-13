@@ -18,7 +18,7 @@ mct/
   config.py          params.yaml の読み込み
   select.py          保存フレームの選抜（追跡モデルに非依存）
   track.py           追跡本体（2パス構成）
-  viz.py             可視化（tracks.json だけを読む）
+  viz.py             可視化4種（tracks.json だけを読む）
   cli.py             コマンドラインエントリポイント
 configs/
   cameras.yaml       カメラ定義（テンプレート）
@@ -27,6 +27,7 @@ configs/
 scripts/
   link_videos.py     元データへの symlink を data/videos/ に張る
   bench.py           処理速度の計測
+  run_viz_all.sh     4種類の可視化をまとめて生成する
 tests/
 data/videos/         入力映像への symlink（git 管理外）
 outputs/             追跡結果・crop・mask（git 管理外）
@@ -80,12 +81,39 @@ python scripts/link_videos.py /path/to/src
 # 1カメラ分の映像を追跡して outputs/ に結果を保存する
 python -m mct.cli track --date 0720 --camera camA
 
-# 追跡結果を重畳した動画を書き出す
-python -m mct.cli viz-video --date 0720 --camera camA
+# 可視化（4種類をまとめて生成）
+scripts/run_viz_all.sh 0720 camA
 
-# 足元点の軌跡図を書き出す（観測区間・遷移領域の定義用）
+# 個別に実行することもできる
+python -m mct.cli viz-video      --date 0720 --camera camA
 python -m mct.cli viz-trajectory --date 0720 --camera camA
+python -m mct.cli viz-density    --date 0720 --camera camA
+python -m mct.cli viz-endpoints  --date 0720 --camera camA
 ```
+
+### 可視化の使い分け
+
+観測区間と遷移領域はこれらの図を見て決めるので、目的ごとに図を分けている。
+いずれも `tracks.json` だけを読むので、追跡を再実行せずに描き直せる。
+
+| コマンド | 出力 | 何を読むための図か |
+| --- | --- | --- |
+| `viz-video` | `{camera}_track.mp4` | 追跡が正しく追えているかをフレーム単位で確認する |
+| `viz-trajectory` | `{camera}_trajectory.png` | 動線の全体像をつかむ |
+| `viz-density` | `{camera}_density.png` | 検出が安定している範囲と、端で急に途切れる位置を見る |
+| `viz-endpoints` | `{camera}_endpoints.png` | 遷移領域の矩形と、進入・退出方向の角度範囲を決める |
+
+`viz-video` は**人物が1人も検出されていないフレームを出力しない**。撮影時間の
+大半が無人だと流して見るだけで時間を取られるため。フレームが飛ぶので元動画の
+フレーム番号を画面に焼き込む。足元点が `--jump-threshold`（既定150px）以上
+跳んだフレームは bbox を赤枠にして `JUMP` と表示する。遮蔽で bbox の下辺が
+切り上がった箇所を見つけるための目印で、判定は真に連続する2フレームの間に
+限る（トラックには最大20フレーム程度の欠落があり、間が空けば足元点が離れるのは
+当然のため）。
+
+`viz-endpoints` では、トラック長が30フレーム未満のものを灰色の小さな点にして
+区別する。一瞬の写り込みや誤検出を遷移領域の判断材料から外せるようにするため。
+座標を読み取れるよう200px間隔のグリッドと目盛りを重ねてある。
 
 `--video` を省くと `data/videos/{date}/{camera}.mp4` を使う。
 その他の主なオプション:
@@ -98,8 +126,8 @@ python -m mct.cli viz-trajectory --date 0720 --camera camA
 | `--stride` | 1 | N フレームに1枚だけ推論する |
 | `--model-pose`, `--model-seg` | YAML の値 | モデルの上書き |
 | `--max-frames` | なし | 先頭 N フレームで打ち切る（動作確認用） |
-
-可視化は `tracks.json` だけを読むので、追跡を再実行せずに描画だけやり直せる。
+| `--jump-threshold` | 150 | `viz-video` で JUMP とみなす足元点の移動量 [px] |
+| `--bin-px` | 20 | `viz-density` のヒストグラムのビン幅 [px] |
 
 ## 処理の流れ
 
@@ -140,6 +168,8 @@ python -m mct.cli viz-trajectory --date 0720 --camera camA
 | `masks/t{track_id:03d}_f{frame_idx:06d}.png` | セグメンテーションマスク |
 | `viz/{camera}_track.mp4` | `viz-video` の出力 |
 | `viz/{camera}_trajectory.png` | `viz-trajectory` の出力 |
+| `viz/{camera}_density.png` | `viz-density` の出力 |
+| `viz/{camera}_endpoints.png` | `viz-endpoints` の出力 |
 
 crop はトラックごとに最大 `n_saved_per_track` 枚。マスクは crop と同一サイズの
 2値 PNG（人物=255, 背景=0）で、IoU が閾値に満たなかったフレームには作られない。
