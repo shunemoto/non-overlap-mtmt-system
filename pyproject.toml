@@ -9,6 +9,7 @@ description = "非重複視野マルチカメラ人物追跡・再同定シス�
 requires-python = ">=3.11"
 dependencies = [
     "ultralytics",
+    "lapx",          # BoT-SORT / ByteTrack の割り当て問題を解く
     "opencv-python",
     "numpy",
     "pyyaml",
@@ -16,8 +17,9 @@ dependencies = [
     "scipy",
 ]
 
-# torch はここに含めない。CUDA 版を環境に合わせて別途インストールする
-# （README の「セットアップ」を参照）。
+# torch はここに含めない。プラットフォームに合ったビルドを別途入れる
+# （README の「セットアップ」を参照）。Apple Silicon では既定のホイールが
+# そのまま MPS に対応する。
 
 [project.optional-dependencies]
 dev = ["pytest"]

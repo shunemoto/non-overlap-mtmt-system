@@ -52,6 +52,7 @@ def _result(camera: str = "camA") -> TrackingResult:
                     foot_point=[125.0, 320.0],
                     saved=True,
                     keypoints=_keypoints(),
+                    crop_box=[95.0, 188.0, 60.0, 144.0],
                 ),
                 FramePoint(
                     frame_idx=2,
@@ -106,6 +107,7 @@ def test_frame_point_roundtrip_both_keypoint_cases() -> None:
         foot_point=[2.5, 6.0],
         saved=True,
         keypoints=_keypoints(),
+        crop_box=[0.5, 1.5, 4.0, 5.0],
     )
     without_kps = FramePoint(
         frame_idx=11,
@@ -119,7 +121,9 @@ def test_frame_point_roundtrip_both_keypoint_cases() -> None:
     assert FramePoint.from_dict(with_kps.to_dict()) == with_kps
     assert FramePoint.from_dict(without_kps.to_dict()) == without_kps
     assert with_kps.to_dict()["keypoints"] is not None
+    assert with_kps.to_dict()["crop_box"] == [0.5, 1.5, 4.0, 5.0]
     assert without_kps.to_dict()["keypoints"] is None
+    assert without_kps.to_dict()["crop_box"] is None
 
 
 def test_int_valued_floats_restore_as_float() -> None:
@@ -163,6 +167,33 @@ def test_keypoints_rejected_when_not_saved() -> None:
         )
 
 
+def test_crop_box_rejected_when_not_saved() -> None:
+    with pytest.raises(ValueError):
+        FramePoint(
+            frame_idx=1,
+            bbox=[1.0, 2.0, 3.0, 4.0],
+            conf=0.5,
+            foot_point=[2.5, 6.0],
+            saved=False,
+            crop_box=[0.0, 0.0, 5.0, 6.0],
+        )
+
+
+def test_crop_box_is_optional_for_old_json() -> None:
+    """フェーズ0 が書いた crop_box 無しの JSON も読み戻せる。"""
+    p = FramePoint.from_dict(
+        {
+            "frame_idx": 1,
+            "bbox": [1.0, 2.0, 3.0, 4.0],
+            "conf": 0.5,
+            "foot_point": [2.5, 6.0],
+            "saved": False,
+            "keypoints": None,
+        }
+    )
+    assert p.crop_box is None
+
+
 def test_json_is_compact_and_not_ascii_escaped(tmp_path: Path) -> None:
     result = _result(camera="正門カメラ")
     path = save_tracking_result(result, tmp_path / "r.json")
@@ -186,7 +217,7 @@ def test_artifact_paths(tmp_path: Path) -> None:
 
     assert crop_path(d, 7, 123) == d / "crops" / "t007_f000123.jpg"
     assert mask_path(d, 7, 123) == d / "masks" / "t007_f000123.png"
-    assert result_path(d) == d / "tracking_result.json"
+    assert result_path(d) == d / "tracks.json"
 
     # tracks のキーは文字列なので、そのまま渡しても同じパスになること。
     assert crop_path(d, "7", 123) == crop_path(d, 7, 123)

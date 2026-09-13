@@ -4,8 +4,11 @@ data/*
 outputs/*
 !outputs/.gitkeep
 
-# モデル重み
+# モデル重み（ultralytics が初回実行時に自動ダウンロードする）
 *.pt
+
+# ultralytics の実行時生成物
+runs/
 
 # Python
 __pycache__/

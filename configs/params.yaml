@@ -1,7 +1,21 @@
 tracking:
-  model_pose: "yolo11x-pose.pt"
+  # --- モデル ---
+  # M1 の MPS で yolo11x-pose は 7.4 fps、yolo11l-pose は 14.6 fps。
+  # 32本を現実的な時間（約10.7時間）で回すため l を既定とする。
+  # 精度優先なら "yolo11x-pose.pt" に変更する（32本で約18.3時間）。
+  model_pose: "yolo11l-pose.pt"
   model_seg: "yolo11x-seg.pt"
   tracker: "botsort.yaml"
   conf_threshold: 0.25
+
+  # --- 保存フレームの選抜 ---
   n_saved_per_track: 90
-  crop_padding_ratio: 0.10
+  n_bins: 9                 # トラックを時間で n_bins 等分し各区画から選ぶ
+  crop_padding_ratio: 0.10  # crop は bbox を四方にこの割合だけ広げて切り出す
+  jpeg_quality: 95
+
+  # --- 推論 ---
+  device: "mps"             # Apple Silicon。CUDA 機なら "cuda"、無ければ "cpu"
+  imgsz: 640
+  stride: 1                 # N フレームに1枚だけ推論（1 = 全フレーム）
+  mask_iou_threshold: 0.30  # これ未満の IoU しか無ければマスク無しとする

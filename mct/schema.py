@@ -32,13 +32,22 @@ class FramePoint:
 
     keypoints: list[list[float]] | None = None
     """COCO 17点 [[x, y, conf], ...]。saved=True のフレームのみ格納し、
-    saved=False のときは None。"""
+    saved=False のときは None。座標は元画像座標系。"""
+
+    crop_box: list[float] | None = None
+    """実際に切り出した矩形 [x, y, w, h]。元画像座標系で、画像端で
+    クリップされた場合はクリップ後の値。bbox を crop_padding_ratio だけ
+    拡張した矩形なので bbox とは一致しない。骨格点を crop 座標系に
+    変換するために必要。saved=True のフレームのみ格納する。"""
 
     def __post_init__(self) -> None:
-        # saved=False のフレームにキーポイントが混ざると、段階2側が
+        # saved=False のフレームにこれらが混ざると、段階2側が
         # 「キーポイントがある = crop 画像もある」と仮定できなくなる。
-        if not self.saved and self.keypoints is not None:
-            raise ValueError("keypoints must be None when saved=False")
+        if not self.saved:
+            if self.keypoints is not None:
+                raise ValueError("keypoints must be None when saved=False")
+            if self.crop_box is not None:
+                raise ValueError("crop_box must be None when saved=False")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,11 +59,13 @@ class FramePoint:
             "keypoints": (
                 None if self.keypoints is None else [list(kp) for kp in self.keypoints]
             ),
+            "crop_box": None if self.crop_box is None else list(self.crop_box),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FramePoint:
         kps = d.get("keypoints")
+        cb = d.get("crop_box")
         return cls(
             frame_idx=int(d["frame_idx"]),
             bbox=[float(v) for v in d["bbox"]],
@@ -62,6 +73,7 @@ class FramePoint:
             foot_point=[float(v) for v in d["foot_point"]],
             saved=bool(d["saved"]),
             keypoints=(None if kps is None else [[float(v) for v in kp] for kp in kps]),
+            crop_box=(None if cb is None else [float(v) for v in cb]),
         )
 
 

@@ -20,7 +20,7 @@ __all__ = [
     "mask_path",
 ]
 
-RESULT_FILENAME = "tracking_result.json"
+RESULT_FILENAME = "tracks.json"
 
 
 def save_tracking_result(result: TrackingResult, path: str | Path) -> Path:
