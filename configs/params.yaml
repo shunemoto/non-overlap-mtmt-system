@@ -1,0 +1,7 @@
+tracking:
+  model_pose: "yolo11x-pose.pt"
+  model_seg: "yolo11x-seg.pt"
+  tracker: "botsort.yaml"
+  conf_threshold: 0.25
+  n_saved_per_track: 90
+  crop_padding_ratio: 0.10

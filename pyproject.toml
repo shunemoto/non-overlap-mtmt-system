@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mct"
+version = "0.1.0"
+description = "非重複視野マルチカメラ人物追跡・再同定システム"
+requires-python = ">=3.11"
+dependencies = [
+    "ultralytics",
+    "opencv-python",
+    "numpy",
+    "pyyaml",
+    "tqdm",
+    "scipy",
+]
+
+# torch はここに含めない。CUDA 版を環境に合わせて別途インストールする
+# （README の「セットアップ」を参照）。
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+mct = "mct.cli:main"
+
+[tool.setuptools]
+packages = ["mct"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
