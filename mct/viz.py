@@ -9,6 +9,10 @@
 - `viz_trajectory` : 動線の全体像をつかむ
 - `viz_density`    : 検出が安定している範囲と、端で途切れる位置を見る
 - `viz_endpoints`  : 遷移領域の矩形と、進入・退出方向の角度範囲を決める
+- `viz_region`     : 定義した観測区間・遷移領域が意図どおりか確かめる
+
+`viz_region` だけは `tracks.json` を読まず、動画と `cameras.yaml` だけで動く。
+領域の座標を書いては確認する作業を、追跡の実行中にも並行してできるようにする。
 """
 
 from __future__ import annotations
@@ -20,10 +24,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from mct.config import CameraConfig, Region, TransitionZone, load_cameras
+from mct.geometry import region_center
 from mct.io_utils import load_tracking_result, output_dir, result_path
 from mct.schema import FramePoint, TrackingResult
 
-__all__ = ["viz_video", "viz_trajectory", "viz_density", "viz_endpoints"]
+__all__ = ["viz_video", "viz_trajectory", "viz_density", "viz_endpoints", "viz_region"]
 
 # COCO 17点の骨格。描画用の接続関係。
 SKELETON: tuple[tuple[int, int], ...] = (
@@ -49,6 +55,16 @@ ENDPOINT_GRID_PX = 200
 START_COLOR = (255, 80, 0)    # BGR: 青
 END_COLOR = (0, 40, 255)      # BGR: 赤
 SHORT_TRACK_COLOR = (150, 150, 150)
+
+EXCLUDE_COLOR = (60, 60, 235)     # BGR: 赤
+EXCLUDE_ALPHA = 0.35
+ZONE_COLOR = (80, 200, 80)        # BGR: 緑
+ZONE_ALPHA = 0.25
+EXIT_COLOR = (0, 150, 255)        # BGR: 橙
+ENTRY_COLOR = (255, 220, 90)      # BGR: 水色
+EXIT_RADIUS = 80
+ENTRY_RADIUS = 55                 # exit と重ねると読めないので内側に描く
+SECTOR_ALPHA = 0.45
 
 
 def _track_color(index: int) -> tuple[int, int, int]:
@@ -518,4 +534,157 @@ def viz_endpoints(video: str | Path, date: str, camera: str, out_root: str | Pat
     dest = _viz_dir(out_dir) / f"{camera}_endpoints.png"
     cv2.imwrite(str(dest), canvas)
     print(f"wrote {dest} ({len(tracks)} tracks, {n_short} short)")
+    return dest
+
+
+def _region_polygon(region: Region) -> np.ndarray:
+    """rect も含めて、塗りと輪郭に使える頂点列にそろえる。"""
+    if region.type == "rect":
+        (x0, y0), (x1, y1) = region.points
+        return np.array(
+            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.int32
+        )
+    return np.asarray(region.points, dtype=np.int32)
+
+
+def _fill_regions(
+    canvas: np.ndarray,
+    regions: list[Region],
+    color: tuple[int, int, int],
+    alpha: float,
+) -> None:
+    """領域を半透明で塗り、輪郭は実線で描く。
+
+    塗りだけ別バッファで合成するのは、輪郭まで薄くすると境界が読めなくなるため。
+    """
+    if not regions:
+        return
+    polygons = [_region_polygon(r) for r in regions]
+    overlay = canvas.copy()
+    cv2.fillPoly(overlay, polygons, color)
+    cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0, canvas)
+    cv2.polylines(canvas, polygons, True, color, 2, cv2.LINE_AA)
+
+
+def _draw_sector(
+    canvas: np.ndarray,
+    center: tuple[int, int],
+    lo: float,
+    hi: float,
+    radius: int,
+    color: tuple[int, int, int],
+) -> None:
+    """角度範囲を扇形で描く。0 をまたぐ区間は2つの扇に分けて描く。
+
+    cv2.ellipse の角度は画像座標系で右向き0度・時計回りなので、
+    cameras.yaml の角度をそのまま渡せる。
+    """
+    spans = [(lo, hi)] if lo <= hi else [(lo, 360.0), (0.0, hi)]
+
+    overlay = canvas.copy()
+    for start, end in spans:
+        cv2.ellipse(overlay, center, (radius, radius), 0, start, end, color, -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, SECTOR_ALPHA, canvas, 1.0 - SECTOR_ALPHA, 0, canvas)
+
+    for start, end in spans:
+        cv2.ellipse(canvas, center, (radius, radius), 0, start, end, color, 2, cv2.LINE_AA)
+    # 範囲の両端を半径線で示し、扇のどこが境界か分かるようにする
+    for angle in (lo, hi):
+        rad = np.radians(angle)
+        tip = (int(center[0] + radius * np.cos(rad)), int(center[1] + radius * np.sin(rad)))
+        cv2.line(canvas, center, tip, color, 2, cv2.LINE_AA)
+
+
+def _zone_caption(zone: TransitionZone) -> str:
+    """遷移先を1行にまとめる。room 指定があれば cam:room と書く。"""
+    if not zone.to:
+        return "to: (未設定)"
+    parts = [t.cam if t.room is None else f"{t.cam}:{t.room}" for t in zone.to]
+    return "to " + ", ".join(parts)
+
+
+def _draw_legend(canvas: np.ndarray) -> None:
+    height = canvas.shape[0]
+    rows = [
+        ("exclude_regions (観測区間の外側)", EXCLUDE_COLOR),
+        ("transition_zones", ZONE_COLOR),
+        ("exit_dir (退出方向)", EXIT_COLOR),
+        ("entry_dir (進入方向)", ENTRY_COLOR),
+    ]
+    x0, y0 = 14, height - 24 - 26 * len(rows)
+
+    box = canvas.copy()
+    cv2.rectangle(box, (x0 - 10, y0 - 26), (x0 + 400, height - 14), (255, 255, 255), -1)
+    cv2.addWeighted(box, 0.65, canvas, 0.35, 0, canvas)
+
+    for i, (text, color) in enumerate(rows):
+        y = y0 + 26 * i
+        cv2.rectangle(canvas, (x0, y - 12), (x0 + 22, y + 2), color, -1)
+        _put_label(canvas, text, (x0 + 32, y + 2), (30, 30, 30), scale=0.55)
+
+
+def viz_region(
+    video: str | Path,
+    date: str,
+    camera: str,
+    out_root: str | Path,
+    config_path: str | Path = "configs/cameras.yaml",
+) -> Path:
+    """cameras.yaml に定義した領域を代表フレームに重ねた静止画を書き出す。
+
+    座標を書いては確かめる作業のための図なので、`tracks.json` は読まない。
+    まだ定義していないカメラでも、背景だけの画像を出して例外にしない。
+    """
+    out_dir = output_dir(out_root, date, camera)
+    cameras = load_cameras(config_path)
+    config = cameras.get(camera)
+    if config is None:
+        print(f"  [注意] {config_path} に {camera} の定義がありません。背景だけ出力します。")
+        config = CameraConfig(name=camera)
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"cannot open video: {video}")
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, n_frames // 2))
+    ok, canvas = cap.read()
+    cap.release()
+    if not ok:
+        width, height = config.image_size or (1920, 1080)
+        canvas = np.full((height, width, 3), 255, np.uint8)
+
+    _draw_grid(canvas)
+    _fill_regions(canvas, config.exclude_regions, EXCLUDE_COLOR, EXCLUDE_ALPHA)
+    _fill_regions(
+        canvas, [z.region for z in config.transition_zones], ZONE_COLOR, ZONE_ALPHA
+    )
+
+    for zone in config.transition_zones:
+        center = region_center(zone.region)
+        if zone.exit_dir is not None:
+            _draw_sector(canvas, center, *zone.exit_dir, EXIT_RADIUS, EXIT_COLOR)
+        if zone.entry_dir is not None:
+            _draw_sector(canvas, center, *zone.entry_dir, ENTRY_RADIUS, ENTRY_COLOR)
+
+        cv2.circle(canvas, center, 5, (255, 255, 255), -1, cv2.LINE_AA)
+        _put_label(canvas, zone.id, (center[0] + 12, center[1] - 8), (255, 255, 255), scale=0.75)
+        _put_label(
+            canvas, _zone_caption(zone), (center[0] + 12, center[1] + 16),
+            (235, 235, 235), scale=0.5,
+        )
+
+    _put_label(
+        canvas,
+        f"{date} {camera}  exclude={len(config.exclude_regions)}  "
+        f"zones={len(config.transition_zones)}  grid={ENDPOINT_GRID_PX}px",
+        (14, 36), (255, 255, 255), scale=0.8,
+    )
+    _draw_legend(canvas)
+
+    dest = _viz_dir(out_dir) / f"{camera}_region.png"
+    cv2.imwrite(str(dest), canvas)
+    print(
+        f"wrote {dest} (exclude {len(config.exclude_regions)}, "
+        f"zones {len(config.transition_zones)})"
+    )
     return dest

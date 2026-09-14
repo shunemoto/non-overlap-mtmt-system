@@ -1,23 +1,67 @@
-# カメラ定義テンプレート
+# カメラごとの観測区間と遷移領域の定義。
 #
-# 撮影日ごとに、その日に使用した8台のカメラを列挙する。
-# date は "0720" のような4桁、camera は "camA" のようなカメラID。
+# 座標はすべて元画像の画素座標（左上原点、y は下向き）。
+# 角度は度で、右向きを 0 度、下向きを 90 度とする
+# （cv2 の y 軸は下向きなので atan2(dy, dx) を度にした値そのまま）。
+# [290, 60] のように 0 をまたぐ区間を書いてよい。
 #
-# 記法:
+# exclude_regions / transition_zones / homography はいずれも省略できる。
+# 定義の途中でも読み込みが通るので、書いては viz-region で確認する、を
+# 繰り返せる。
 #
-# cameras:
-#   "0720":
-#     camA:
-#       video: "data/0720/camA.mp4"   # 入力動画のパス（リポジトリルートからの相対）
-#       width: 1920                   # フレーム幅 [px]
-#       height: 1080                  # フレーム高 [px]
-#       fps: 30.0                     # フレームレート
-#       note: ""                      # 設置位置などの自由記述（任意）
-#     camB:
-#       video: ""
-#       width:
-#       height:
-#       fps:
-#       note: ""
+#   python -m mct.cli viz-region --date 0720 --camera camA
+#
+# region の型:
+#   type: rect     points は [左上, 右下] の2点
+#   type: polygon  points は3点以上の頂点列
 
-cameras: {}
+cameras:
+  camA:
+    image_size: [1920, 1080]
+
+    # 観測区間の「外側」を指定する。ここに入る点をトラックから削除する
+    exclude_regions:
+      - type: rect
+        points: [[0, 0], [1920, 180]]          # 左上, 右下
+      - type: polygon
+        points: [[0, 900], [420, 1080], [0, 1080]]
+
+    # 遷移領域。出現・退出位置と進行方向から遷移先候補を決める
+    transition_zones:
+      - id: a_corridor
+        region:
+          type: rect
+          points: [[820, 300], [1500, 1080]]
+        exit_dir: [290, 60]      # 退出時の進行方向の許容範囲（度）
+        entry_dir: [110, 240]    # 出現時の進行方向の許容範囲（度）
+        to:
+          - {cam: camB, room: null}
+          - {cam: camA, room: design_room}   # 自己ループ
+
+    # ホモグラフィ（画像座標 → BEV 実空間座標）。今は空でよい
+    homography:
+      image_points: []
+      world_points: []
+
+  # 以下7台は未定義。image_size だけ先に入れておくと、座標を書いたときに
+  # 範囲外チェックが効く。
+  camB:
+    image_size: [1920, 1080]
+
+  camC:
+    image_size: [1920, 1080]
+
+  camD:
+    image_size: [1920, 1080]
+
+  camE:
+    image_size: [1920, 1080]
+
+  camF:
+    image_size: [1920, 1080]
+
+  camG:
+    image_size: [1920, 1080]
+
+  camH:
+    image_size: [1920, 1080]

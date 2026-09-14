@@ -9,6 +9,7 @@ __all__ = ["build_parser", "main"]
 
 DEFAULT_OUT_ROOT = "outputs"
 DEFAULT_CONFIG = "configs/params.yaml"
+DEFAULT_CAMERAS = "configs/cameras.yaml"
 DEFAULT_VIDEO_ROOT = "data/videos"
 
 
@@ -78,6 +79,13 @@ def cmd_viz_endpoints(args: argparse.Namespace) -> int:
     from mct.viz import viz_endpoints
 
     viz_endpoints(_video_path(args), args.date, args.camera, args.out)
+    return 0
+
+
+def cmd_viz_region(args: argparse.Namespace) -> int:
+    from mct.viz import viz_region
+
+    viz_region(_video_path(args), args.date, args.camera, args.out, args.config)
     return 0
 
 
@@ -154,6 +162,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(p_viz_e, with_config=False)
     p_viz_e.set_defaults(func=cmd_viz_endpoints)
+
+    p_viz_r = sub.add_parser(
+        "viz-region", help="定義した観測区間・遷移領域を重ねた図を書き出す"
+    )
+    _add_common(p_viz_r, with_config=False)
+    p_viz_r.add_argument(
+        "--config", default=DEFAULT_CAMERAS,
+        help=f"カメラ定義 YAML (default: {DEFAULT_CAMERAS})",
+    )
+    p_viz_r.set_defaults(func=cmd_viz_region)
 
     return parser
 

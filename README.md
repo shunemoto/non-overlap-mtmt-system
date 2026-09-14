@@ -16,12 +16,13 @@ mct/
   schema.py          追跡結果のデータ構造（FramePoint / TrackMeta / TrackingResult）
   io_utils.py        JSON の保存・読み込みと出力パス規約
   config.py          params.yaml の読み込み
+  geometry.py        領域・角度の判定（追跡モデルに非依存）
   select.py          保存フレームの選抜（追跡モデルに非依存）
   track.py           追跡本体（2パス構成）
-  viz.py             可視化4種（tracks.json だけを読む）
+  viz.py             可視化5種（追跡モデルを import しない）
   cli.py             コマンドラインエントリポイント
 configs/
-  cameras.yaml       カメラ定義（テンプレート）
+  cameras.yaml       観測区間と遷移領域の定義
   transitions.yaml   カメラ間の移動時間（テンプレート）
   params.yaml        追跡パラメータの既定値
 scripts/
@@ -102,6 +103,10 @@ python -m mct.cli viz-endpoints  --date 0720 --camera camA
 | `viz-trajectory` | `{camera}_trajectory.png` | 動線の全体像をつかむ |
 | `viz-density` | `{camera}_density.png` | 検出が安定している範囲と、端で急に途切れる位置を見る |
 | `viz-endpoints` | `{camera}_endpoints.png` | 遷移領域の矩形と、進入・退出方向の角度範囲を決める |
+| `viz-region` | `{camera}_region.png` | 定義した観測区間・遷移領域が意図どおりか確かめる |
+
+`viz-region` だけは `tracks.json` を読まず、**動画と `configs/cameras.yaml` だけ**で
+動く。領域の座標を書いては確認する作業を、追跡の実行中にも並行してできる。
 
 `viz-video` は**人物が1人も検出されていないフレームを出力しない**。撮影時間の
 大半が無人だと流して見るだけで時間を取られるため。フレームが飛ぶので元動画の
@@ -114,6 +119,48 @@ python -m mct.cli viz-endpoints  --date 0720 --camera camA
 `viz-endpoints` では、トラック長が30フレーム未満のものを灰色の小さな点にして
 区別する。一瞬の写り込みや誤検出を遷移領域の判断材料から外せるようにするため。
 座標を読み取れるよう200px間隔のグリッドと目盛りを重ねてある。
+
+## 観測区間と遷移領域の定義
+
+`configs/cameras.yaml` にカメラごとの領域を書き、`viz-region` で確認する。
+
+```bash
+python -m mct.cli viz-region --date 0720 --camera camA
+```
+
+```yaml
+cameras:
+  camA:
+    image_size: [1920, 1080]
+    exclude_regions:            # 観測区間の「外側」。ここに入る点は後段で削除する
+      - type: rect
+        points: [[0, 0], [1920, 180]]          # 左上, 右下
+      - type: polygon
+        points: [[0, 900], [420, 1080], [0, 1080]]
+    transition_zones:
+      - id: a_corridor
+        region:
+          type: rect
+          points: [[820, 300], [1500, 1080]]
+        exit_dir: [290, 60]     # 退出時の進行方向の許容範囲（度）
+        entry_dir: [110, 240]   # 出現時の進行方向の許容範囲（度）
+        to:
+          - {cam: camB, room: null}
+          - {cam: camA, room: design_room}     # 自己ループ
+    homography:                 # 画像座標 → BEV 実空間座標。未計測なら空でよい
+      image_points: []
+      world_points: []
+```
+
+- `type` は `rect`（左上・右下の2点）または `polygon`（頂点は3点以上）
+- 角度は度。画像座標系で**右向きが0度、下向きが90度**（`atan2(dy, dx)` を度に
+  したもの。cv2 の y 軸は下向き）。`[290, 60]` のように0をまたぐ区間を書ける
+- `exclude_regions` / `transition_zones` / `homography` はいずれも省略できる。
+  定義の途中でも読み込みが通るので、書いては確認する作業を繰り返せる
+- `image_size` を書いておくと、座標が画像の外に出たときに読み込みで弾かれる
+
+検証は明らかな誤り（点数、画像範囲外、角度の範囲、`id` の重複）に限っている。
+違反したときはどのカメラのどの領域かを含めた `CameraConfigError` になる。
 
 `--video` を省くと `data/videos/{date}/{camera}.mp4` を使う。
 その他の主なオプション:
