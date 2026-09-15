@@ -18,7 +18,17 @@ from mct.config import CameraConfig
 from mct.geometry import angle_in_range, direction_deg, point_in_regions
 from mct.schema import FramePoint, TrackingResult
 
-__all__ = ["ZoneReport", "CameraReport", "analyse", "print_camera_report", "print_summary"]
+__all__ = [
+    "ZoneReport",
+    "CameraReport",
+    "PointMatch",
+    "analyse",
+    "angle_gap",
+    "match_zones",
+    "track_direction",
+    "print_camera_report",
+    "print_summary",
+]
 
 FRAGMENT_MAX_PX = 150.0
 FRAGMENT_MAX_FRAMES = 30
@@ -54,6 +64,10 @@ class CameraReport:
     zones: list[ZoneReport] = field(default_factory=list)
     fragments: list[tuple[str, str, float, int]] = field(default_factory=list)
 
+    # 2つ以上のゾーンに同時該当した件数。ゾーン対ごとに数える。
+    entry_duplicates: dict[tuple[str, ...], int] = field(default_factory=dict)
+    exit_duplicates: dict[tuple[str, ...], int] = field(default_factory=dict)
+
     @property
     def n_matched_entry(self) -> int:
         return self.n_after - self.entry_outside_region - self.entry_angle_mismatch
@@ -63,7 +77,9 @@ class CameraReport:
         return self.n_after - self.exit_outside_region - self.exit_angle_mismatch
 
 
-def _direction(points: list[FramePoint], dir_frames: int, *, entering: bool) -> float | None:
+def track_direction(
+    points: list[FramePoint], dir_frames: int, *, entering: bool
+) -> float | None:
     """進入（または退出）方向を度で返す。動きが無ければ None。
 
     先頭/末尾の1フレーム差だと検出のぶれがそのまま角度になるので、
@@ -93,34 +109,87 @@ def _direction(points: list[FramePoint], dir_frames: int, *, entering: bool) -> 
     return direction_deg(dx, dy)
 
 
-def _classify(
+def _circular_diff(a: float, b: float) -> float:
+    """2つの角度の差（0〜180度）。"""
+    d = abs((a - b) % 360.0)
+    return min(d, 360.0 - d)
+
+
+def angle_gap(deg: float, lo: float, hi: float) -> float:
+    """角度が範囲からどれだけ外れているか（度）。範囲内なら 0。"""
+    if angle_in_range(deg, lo, hi):
+        return 0.0
+    return min(_circular_diff(deg, lo), _circular_diff(deg, hi))
+
+
+@dataclass
+class PointMatch:
+    """トラックの出現点（または退出点）がどのゾーンに該当したか。
+
+    `zones` に該当したゾーンを**すべて**入れる。2つ以上並べば遷移領域が
+    重なっている証拠になり、どちらに割り当てるべきか曖昧なまま後段に
+    渡していることが分かる。
+    """
+
+    point: tuple[float, float]
+    direction: float | None
+    zones: list[str] = field(default_factory=list)
+    reason: str | None = None            # None なら該当あり
+    nearest_zone: str | None = None      # angle_mismatch のときの最寄り
+    nearest_gap: float | None = None     # その定義範囲との差（度）
+    nearest_range: tuple[float, float] | None = None
+
+    @property
+    def matched(self) -> bool:
+        return bool(self.zones)
+
+    @property
+    def is_duplicate(self) -> bool:
+        return len(self.zones) > 1
+
+
+def match_zones(
     points: list[FramePoint],
     cam_cfg: CameraConfig,
     dir_frames: int,
     *,
     entering: bool,
-) -> tuple[str | None, bool]:
-    """(該当した遷移領域の id, 位置は合っていたか) を返す。
+) -> PointMatch:
+    """出現点（または退出点）に該当する遷移領域をすべて求める。
 
-    位置が合っていて角度だけ外れた場合は (None, True) になり、
-    定義漏れ（位置も外れ）と区別できる。
+    該当しなかった場合の理由を2つに分ける。`outside_region` は矩形の
+    定義漏れ、`angle_mismatch` は角度範囲の誤りを指すので、どちらを直せば
+    よいかがそのまま分かる。
     """
-    point = points[0] if entering else points[-1]
-    deg = _direction(points, dir_frames, entering=entering)
+    anchor = points[0] if entering else points[-1]
+    point = (float(anchor.foot_point[0]), float(anchor.foot_point[1]))
+    deg = track_direction(points, dir_frames, entering=entering)
+    match = PointMatch(point=point, direction=deg)
 
-    position_matched = False
-    for zone in cam_cfg.transition_zones:
-        if not point_in_regions(point.foot_point, [zone.region]):
-            continue
-        position_matched = True
+    inside = [
+        z for z in cam_cfg.transition_zones if point_in_regions(point, [z.region])
+    ]
+    if not inside:
+        match.reason = "outside_region"
+        return match
 
+    best_gap: float | None = None
+    for zone in inside:
         rng = zone.entry_dir if entering else zone.exit_dir
         if rng is None:              # 角度の指定が無ければ位置だけで合致とみなす
-            return zone.id, True
+            match.zones.append(zone.id)
+            continue
         if deg is not None and angle_in_range(deg, *rng):
-            return zone.id, True
+            match.zones.append(zone.id)
+            continue
+        gap = 180.0 if deg is None else angle_gap(deg, *rng)
+        if best_gap is None or gap < best_gap:
+            best_gap, match.nearest_zone, match.nearest_range = gap, zone.id, rng
 
-    return None, position_matched
+    if not match.zones:
+        match.reason = "angle_mismatch"
+        match.nearest_gap = best_gap
+    return match
 
 
 def _find_fragments(
@@ -180,14 +249,20 @@ def analyse(
 
     for points in filtered.tracks.values():
         for entering in (True, False):
-            zone_id, position_matched = _classify(points, cam_cfg, dir_frames, entering=entering)
-            if zone_id is not None:
-                counter = by_id[zone_id]
-                if entering:
-                    counter.n_entry += 1
-                else:
-                    counter.n_exit += 1
-            elif position_matched:      # 位置は合うが角度が範囲外
+            match = match_zones(points, cam_cfg, dir_frames, entering=entering)
+            duplicates = report.entry_duplicates if entering else report.exit_duplicates
+
+            if match.matched:
+                for zone_id in match.zones:
+                    counter = by_id[zone_id]
+                    if entering:
+                        counter.n_entry += 1
+                    else:
+                        counter.n_exit += 1
+                if match.is_duplicate:
+                    key = tuple(sorted(match.zones))
+                    duplicates[key] = duplicates.get(key, 0) + 1
+            elif match.reason == "angle_mismatch":
                 if entering:
                     report.entry_angle_mismatch += 1
                 else:
@@ -236,8 +311,17 @@ def print_camera_report(report: CameraReport, removed_static: list[dict[str, Any
     )
 
     for zone in r.zones:
-        mark = "  ⚠ 該当0件" if zone.n_entry == 0 and zone.n_exit == 0 else ""
+        marks = []
+        if zone.n_entry == 0:
+            marks.append("出現0件")
+        if zone.n_exit == 0:
+            marks.append("退出0件")
+        mark = f"  ⚠ {' / '.join(marks)}" if marks else ""
         print(f"    {zone.zone_id:<12} 出現 {zone.n_entry:>4} / 退出 {zone.n_exit:>4}{mark}")
+
+    for label, duplicates in (("出現", r.entry_duplicates), ("退出", r.exit_duplicates)):
+        for zones, count in sorted(duplicates.items()):
+            print(f"    ⚠ {label}で {' と '.join(zones)} に同時該当 = {count}件")
 
     if removed_static:
         print(f"  静止誤検出として除外した {len(removed_static)} 件:")
@@ -305,18 +389,52 @@ def print_summary(reports: list[CameraReport]) -> None:
             f"角度外 {100*xa/n_after:.1f}%）"
         )
 
-    empty = [
-        f"{r.camera}/{z.zone_id}"
-        for r in reports
-        for z in r.zones
-        if z.n_entry == 0 and z.n_exit == 0
-    ]
-    if empty:
-        counts: dict[str, int] = {}
-        for name in empty:
-            counts[name] = counts.get(name, 0) + 1
-        print(f"\n⚠ 該当0件の遷移領域（日付数）: " + ", ".join(
-            f"{k}×{v}" for k, v in sorted(counts.items())
-        ))
-    else:
-        print("\n該当0件の遷移領域はありません。")
+    _print_zone_totals(reports)
+    _print_duplicate_totals(reports)
+
+
+def _print_zone_totals(reports: list[CameraReport]) -> None:
+    """ゾーンごとの該当数を出現・退出に分けて日付横断で集計する。"""
+    totals: dict[tuple[str, str], list[int]] = {}
+    for r in reports:
+        for z in r.zones:
+            key = (r.camera, z.zone_id)
+            acc = totals.setdefault(key, [0, 0, 0])
+            acc[0] += z.n_entry
+            acc[1] += z.n_exit
+            acc[2] += 1
+
+    print("\n遷移領域ごとの該当数（4日合計）")
+    print(f"  {'cam':<6}{'zone':<14}{'出現':>7}{'退出':>7}   備考")
+    print("  " + "-" * 58)
+    for (camera, zone_id), (n_entry, n_exit, n_days) in sorted(totals.items()):
+        notes = []
+        if n_entry == 0:
+            notes.append("出現0件")
+        if n_exit == 0:
+            notes.append("退出0件")
+        print(
+            f"  {camera:<6}{zone_id:<14}{n_entry:>7}{n_exit:>7}   "
+            f"{'⚠ ' + ' / '.join(notes) if notes else ''}"
+        )
+
+
+def _print_duplicate_totals(reports: list[CameraReport]) -> None:
+    """複数ゾーンに同時該当したトラックの集計。
+
+    遷移領域が重なっていると、どちらの経路に割り当てるべきか決まらない。
+    """
+    merged: dict[tuple[str, str, tuple[str, ...]], int] = {}
+    for r in reports:
+        for label, duplicates in (("出現", r.entry_duplicates), ("退出", r.exit_duplicates)):
+            for zones, count in duplicates.items():
+                key = (r.camera, label, zones)
+                merged[key] = merged.get(key, 0) + count
+
+    if not merged:
+        print("\n複数ゾーンに同時該当したトラックはありません。")
+        return
+
+    print(f"\n⚠ 複数ゾーンに同時該当（4日合計 {sum(merged.values())} 件）")
+    for (camera, label, zones), count in sorted(merged.items()):
+        print(f"  {camera}: {label}で {' と '.join(zones)} に同時該当 = {count}件")

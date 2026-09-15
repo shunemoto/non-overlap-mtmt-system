@@ -29,7 +29,14 @@ from mct.geometry import region_center
 from mct.io_utils import load_tracking_result, output_dir, result_path
 from mct.schema import FramePoint, TrackingResult
 
-__all__ = ["viz_video", "viz_trajectory", "viz_density", "viz_endpoints", "viz_region"]
+__all__ = [
+    "viz_video",
+    "viz_trajectory",
+    "viz_density",
+    "viz_endpoints",
+    "viz_region",
+    "viz_zones",
+]
 
 # COCO 17点の骨格。描画用の接続関係。
 SKELETON: tuple[tuple[int, int], ...] = (
@@ -65,6 +72,7 @@ ENTRY_COLOR = (255, 220, 90)      # BGR: 水色
 EXIT_RADIUS = 80
 ENTRY_RADIUS = 55                 # exit と重ねると読めないので内側に描く
 SECTOR_ALPHA = 0.45
+ZONE_ARROW_PX = 42
 
 
 def _track_color(index: int) -> tuple[int, int, int]:
@@ -686,5 +694,127 @@ def viz_region(
     print(
         f"wrote {dest} (exclude {len(config.exclude_regions)}, "
         f"zones {len(config.transition_zones)})"
+    )
+    return dest
+
+
+def _zone_color(index: int) -> tuple[int, int, int]:
+    """遷移領域ごとの色。トラックの色とは別の系列にして混同を避ける。"""
+    hue = (0.08 + index * 0.37) % 1.0
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
+    return int(b * 255), int(g * 255), int(r * 255)
+
+
+def _draw_direction(
+    canvas: np.ndarray,
+    center: tuple[int, int],
+    deg: float,
+    color: tuple[int, int, int],
+    placed: list[tuple[int, int, int, int]],
+) -> None:
+    """進行方向の短い矢印と、その脇に角度の数値を描く。"""
+    rad = np.radians(deg)
+    tip = (
+        int(center[0] + ZONE_ARROW_PX * np.cos(rad)),
+        int(center[1] + ZONE_ARROW_PX * np.sin(rad)),
+    )
+    cv2.arrowedLine(canvas, center, tip, (255, 255, 255), 5, cv2.LINE_AA, tipLength=0.35)
+    cv2.arrowedLine(canvas, center, tip, color, 2, cv2.LINE_AA, tipLength=0.35)
+
+    text = f"{deg:.0f}"
+    lx, ly = _place_label(placed, tip, text, 0.45, offset=(6, 4))
+    _put_label(canvas, text, (lx, ly), color, scale=0.45)
+
+
+def viz_zones(
+    video: str | Path,
+    date: str,
+    camera: str,
+    out_root: str | Path,
+    config_path: str | Path = "configs/cameras.yaml",
+) -> Path:
+    """トラックの出現点・退出点を、該当した遷移領域の色で塗り分けた図。
+
+    ゾーンの色と点の色が一致していれば意図どおり。灰色の点がどこに
+    集まっているかで矩形を広げるべき方向が分かり、白の二重丸があれば
+    遷移領域が重なっていて割り当てが決まらない箇所が見つかる。
+    """
+    from mct.config import load_cameras
+    from mct.diagnostics import match_zones
+    from mct.io_utils import result_path
+    from mct.pipeline import FILTERED_FILENAME, _filtering_params
+
+    out_dir = output_dir(out_root, date, camera)
+    source = out_dir / FILTERED_FILENAME
+    if not source.is_file():
+        raise FileNotFoundError(f"{source} がありません。先に filter を実行してください。")
+
+    cameras = load_cameras(config_path)
+    config = cameras.get(camera) or CameraConfig(name=camera)
+    result = load_tracking_result(source)
+    params = _filtering_params("configs/params.yaml")
+    dir_frames = int(params.get("dir_frames", 30))
+
+    canvas = _faded(_background_frame(video, result))
+    _draw_grid(canvas)
+
+    colors = {z.id: _zone_color(i) for i, z in enumerate(config.transition_zones)}
+    for zone in config.transition_zones:
+        color = colors[zone.id]
+        _fill_regions(canvas, [zone.region], color, ZONE_ALPHA)
+        center = region_center(zone.region)
+        _put_label(canvas, zone.id, (center[0] - 40, center[1]), color, scale=0.7)
+
+    placed: list[tuple[int, int, int, int]] = []
+    n_matched = {"entry": 0, "exit": 0}
+    n_duplicate = 0
+    n_gray = 0
+
+    for tid, points in sorted(result.tracks.items(), key=lambda kv: int(kv[0])):
+        for entering in (True, False):
+            match = match_zones(points, config, dir_frames, entering=entering)
+            center = (int(match.point[0]), int(match.point[1]))
+
+            if not match.matched:
+                cv2.circle(canvas, center, 4, SHORT_TRACK_COLOR, -1, cv2.LINE_AA)
+                n_gray += 1
+                continue
+
+            color = colors[match.zones[0]]
+            n_matched["entry" if entering else "exit"] += 1
+            if entering:
+                cv2.circle(canvas, center, 9, (255, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(canvas, center, 7, color, -1, cv2.LINE_AA)      # 出現は塗り
+            else:
+                cv2.circle(canvas, center, 10, (255, 255, 255), 3, cv2.LINE_AA)
+                cv2.circle(canvas, center, 10, color, 2, cv2.LINE_AA)      # 退出は輪郭
+
+            if match.is_duplicate:      # 複数ゾーンに同時該当した点を白の二重丸で強調
+                cv2.circle(canvas, center, 15, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.circle(canvas, center, 19, (255, 255, 255), 2, cv2.LINE_AA)
+                n_duplicate += 1
+
+            if match.direction is not None:
+                _draw_direction(canvas, center, match.direction, color, placed)
+
+            lx, ly = _place_label(placed, center, tid, 0.5)
+            _put_label(canvas, tid, (lx, ly), color, scale=0.5)
+
+    _put_label(
+        canvas,
+        f"{date} {camera}  tracks={len(result.tracks)}  "
+        f"出現該当 {n_matched['entry']} / 退出該当 {n_matched['exit']}  "
+        f"該当なし {n_gray}  重複 {n_duplicate}",
+        (14, 36), (0, 0, 0), scale=0.75,
+    )
+    _put_label(canvas, "塗り円 = 出現 / 輪郭円 = 退出（色はゾーン）", (14, 66), (40, 40, 40), scale=0.55)
+    _put_label(canvas, "白の二重丸 = 複数ゾーンに同時該当", (14, 90), (60, 60, 60), scale=0.55)
+    _put_label(canvas, "灰色の点 = どのゾーンにも該当せず", (14, 114), SHORT_TRACK_COLOR, scale=0.55)
+
+    dest = _viz_dir(out_dir) / f"{camera}_zones.png"
+    cv2.imwrite(str(dest), canvas)
+    print(
+        f"wrote {dest} (出現 {n_matched['entry']} / 退出 {n_matched['exit']} / "
+        f"該当なし {n_gray} / 重複 {n_duplicate})"
     )
     return dest
