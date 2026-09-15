@@ -14,6 +14,7 @@ ALL_CAMERAS = ("camA", "camB", "camC", "camD", "camE", "camF", "camG", "camH")
 ALL_DATES = ("0720", "0727", "0730", "0803")
 DEFAULT_VIDEO_ROOT = "data/videos"
 DEFAULT_GT_ROOT = "data/gt"
+DEFAULT_TRANSITIONS = "configs/transitions.yaml"
 
 
 def _video_path(args: argparse.Namespace, camera: str | None = None) -> Path:
@@ -215,6 +216,106 @@ def cmd_eval_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidates(args: argparse.Namespace) -> int:
+    import warnings
+
+    from mct.candidate_pipeline import (
+        _spatiotemporal, build_candidates, print_arrival_error, print_counts,
+        print_speed_stats, write_candidates,
+    )
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    all_summaries: list = []
+    all_candidates: list = []
+    totals = {"tracks": 0, "candidates": 0}
+
+    for date in dates:
+        summaries, candidates, meta = build_candidates(
+            date, args.out, args.config, args.transitions, args.params,
+            no_topology=args.no_topology,
+        )
+        dest = write_candidates(date, args.out, summaries, candidates, meta)
+        print_counts(date, summaries, candidates)
+        print(f"  wrote {dest}")
+
+        totals["tracks"] += len(summaries)
+        totals["candidates"] += len(candidates)
+        all_summaries.extend(summaries)
+        all_candidates.append((date, summaries, candidates))
+
+    print(f"\n合計: トラック {totals['tracks']} / 候補 {totals['candidates']}")
+    print_speed_stats(all_summaries)
+
+    if args.eval:
+        _report_recall(args, all_candidates)
+    return 0
+
+
+def _report_recall(args: argparse.Namespace, per_date: list) -> None:
+    """GT と突き合わせて候補の再現率と到着時刻の誤差を出す。"""
+    import warnings
+
+    from mct.candidate_pipeline import _spatiotemporal, print_arrival_error
+    from mct.config import load_cameras, load_params, load_transitions
+    from mct.evaluation import (
+        candidate_recall, classify_missed, match_tracks, print_missed_breakdown,
+    )
+    from mct.gt import gt_transitions, load_ground_truth
+    from mct.io_utils import load_tracking_result
+
+    cameras = load_cameras(args.config)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        routes = load_transitions(args.transitions, cameras)
+    ev_params = load_params(args.params).get("evaluation") or {}
+    st_params, _ = _spatiotemporal(args.params)
+    fps = float(st_params["fps"])
+
+    total_gt = total_covered = 0
+    merged_buckets: dict[str, list] = {}
+
+    for date, summaries, candidates in per_date:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            gt = load_ground_truth(args.gt_root, date)
+
+        matchings = {}
+        for camera in ALL_CAMERAS:
+            source = Path(args.out) / date / camera / "tracks_filtered.json"
+            if source.is_file():
+                matchings[camera] = match_tracks(
+                    load_tracking_result(source), gt, camera, ev_params
+                )
+
+        report = candidate_recall([c.as_link() for c in candidates], gt, matchings)
+        total_gt += report.n_gt
+        total_covered += report.n_covered
+        print(f"\n--- {date} 候補の再現率 ---")
+        print(f"  {report.n_covered} / {report.n_gt} = {report.recall:.4f}")
+
+        by_key = {s.key: s for s in summaries}
+        buckets = classify_missed(report.missed, gt, by_key, routes, matchings, fps)
+        for reason, items in buckets.items():
+            merged_buckets.setdefault(reason, []).extend(items)
+
+        # 到着時刻の誤差は、GT で正解とされた対だけを見る
+        to_pred = {
+            (camera, g): (camera, int(p))
+            for camera, m in matchings.items() for p, g in m.pairs.items()
+        }
+        correct = set()
+        for t in gt_transitions(gt):
+            a = to_pred.get((t.from_cam, t.from_track))
+            b = to_pred.get((t.to_cam, t.to_track))
+            if a and b:
+                correct.add((a, b))
+        print_arrival_error(candidates, by_key, correct, fps)
+
+    print(f"\n{'='*70}\n全日付の候補再現率: {total_covered} / {total_gt} = "
+          f"{total_covered/total_gt if total_gt else 0:.4f}\n{'='*70}")
+    print_missed_breakdown(merged_buckets, total_gt)
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     from mct.cache import clear, list_entries
 
@@ -390,6 +491,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="キャッシュを無視して作り直す"
     )
     p_filter.set_defaults(func=cmd_filter)
+
+    p_cand = sub.add_parser(
+        "candidates", help="カメラ間トポロジーから対応候補を列挙する"
+    )
+    p_cand.add_argument("--date", help='撮影日 (例: "0720")')
+    p_cand.add_argument("--all-dates", action="store_true", help="全4日を処理する")
+    p_cand.add_argument(
+        "--no-topology", action="store_true",
+        help="トポロジーを使わず時間順序と区間非重複だけで列挙する（比較手法①）",
+    )
+    p_cand.add_argument(
+        "--eval", action="store_true", help="GT と突き合わせて候補の再現率も出す"
+    )
+    p_cand.add_argument(
+        "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+    )
+    p_cand.add_argument(
+        "--config", default=DEFAULT_CAMERAS,
+        help=f"カメラ定義 YAML (default: {DEFAULT_CAMERAS})",
+    )
+    p_cand.add_argument(
+        "--transitions", default=DEFAULT_TRANSITIONS,
+        help=f"遷移定義 YAML (default: {DEFAULT_TRANSITIONS})",
+    )
+    p_cand.add_argument(
+        "--params", default=DEFAULT_CONFIG,
+        help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    p_cand.add_argument(
+        "--gt-root", default=DEFAULT_GT_ROOT, help=f"GT のルート (default: {DEFAULT_GT_ROOT})"
+    )
+    p_cand.set_defaults(func=cmd_candidates)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')

@@ -311,12 +311,20 @@ class CandidateRecall:
 
 
 def candidate_recall(
-    candidates: list[dict[str, Any]], gt: GroundTruth
+    candidates: list[dict[str, Any]],
+    gt: GroundTruth,
+    matchings: dict[str, TrackMatching] | None = None,
 ) -> CandidateRecall:
     """GT の正解遷移のうち、候補として列挙された割合。
 
     候補は `{"from": {"cam", "track"}, "to": {"cam", "track"}}` の並び。
     向きは問わない（どちらの順で挙がっていても届いているとみなす）。
+
+    候補は**予測側のトラックID**で書かれているので、`matchings` を渡して
+    GT のトラックIDを予測側に翻訳してから照合する。渡さない場合は
+    GT 空間どうしの比較になる（GT をそのまま候補にした動作確認用）。
+    対応する予測トラックが無い遷移は、そもそも候補になり得ないので
+    `missed` に入る。
     """
     listed: set[tuple[str, int, str, int]] = set()
     for c in candidates:
@@ -328,18 +336,38 @@ def candidate_recall(
         listed.add((*a, *b))
         listed.add((*b, *a))
 
+    to_pred = _gt_to_pred_map(matchings) if matchings else None
+
     report = CandidateRecall()
     for transition in gt_transitions(gt):
         report.n_gt += 1
-        key = (
-            transition.from_cam, transition.from_track,
-            transition.to_cam, transition.to_track,
-        )
-        if key in listed:
+        ends = [
+            (transition.from_cam, transition.from_track),
+            (transition.to_cam, transition.to_track),
+        ]
+        if to_pred is not None:
+            translated = [to_pred.get(e) for e in ends]
+            if any(t is None for t in translated):
+                report.missed.append(transition)
+                continue
+            ends = translated                       # type: ignore[assignment]
+
+        if (*ends[0], *ends[1]) in listed:
             report.n_covered += 1
         else:
             report.missed.append(transition)
     return report
+
+
+def _gt_to_pred_map(
+    matchings: dict[str, TrackMatching]
+) -> dict[tuple[str, int], tuple[str, int]]:
+    """(camera, GT track) -> (camera, 予測 track) の対応。"""
+    return {
+        (camera, gt_track): (camera, int(pred_track))
+        for camera, matching in matchings.items()
+        for pred_track, gt_track in matching.pairs.items()
+    }
 
 
 # --------------------------------------------------------------------------
@@ -447,3 +475,97 @@ def print_candidate_recall(date: str, report: CandidateRecall) -> None:
     for (a, b), n in by_pair.most_common():
         label = f"{a} -> {b}" + ("（自己ループ）" if a == b else "")
         print(f"    {label:<28} {n:>4} 件")
+
+
+# --------------------------------------------------------------------------
+# 候補から落ちた遷移の分類
+# --------------------------------------------------------------------------
+
+MISS_REASONS = (
+    "no_pred_track",     # 対応する予測トラックが無い（検出漏れ・フィルタで除去）
+    "zone_none",         # どちらかの端点が遷移領域に該当しない
+    "no_route",          # transitions.yaml にそのゾーン対の経路が無い
+    "overlap",           # 出現区間が重なっている
+    "below_min_time",    # 探索時間の下限を満たさない
+    "other",
+)
+
+
+def classify_missed(
+    missed: list[GTTransition],
+    gt: GroundTruth,
+    summaries: dict[tuple[str, int], Any],
+    routes: list[Any],
+    matchings: dict[str, TrackMatching] | None,
+    fps: float,
+) -> dict[str, list[GTTransition]]:
+    """候補に入らなかった遷移を理由ごとに分ける。
+
+    どこを直せば再現率が上がるかを切り分けるための分類。上流（検出・フィルタ）
+    が原因なのか、ゾーン定義なのか、経路定義なのかで打ち手が変わる。
+    `summaries` は (camera, 予測 track_id) をキーとする TrackSummary。
+    """
+    to_pred = _gt_to_pred_map(matchings) if matchings else None
+    buckets: dict[str, list[GTTransition]] = {r: [] for r in MISS_REASONS}
+
+    for t in missed:
+        tgt_key, src_key = (t.from_cam, t.from_track), (t.to_cam, t.to_track)
+        if to_pred is not None:
+            tgt_key = to_pred.get(tgt_key)          # type: ignore[assignment]
+            src_key = to_pred.get(src_key)          # type: ignore[assignment]
+            if tgt_key is None or src_key is None:
+                buckets["no_pred_track"].append(t)
+                continue
+
+        tgt = summaries.get(tgt_key)
+        src = summaries.get(src_key)
+        if tgt is None or src is None:
+            buckets["no_pred_track"].append(t)
+            continue
+        if not tgt.exit_zones or not src.entry_zones:
+            buckets["zone_none"].append(t)
+            continue
+
+        usable = [
+            r for r in routes
+            if r.from_cam == tgt.camera and r.from_zone in tgt.exit_zones
+            and r.to_cam == src.camera and r.to_zone in src.entry_zones
+        ]
+        if not usable:
+            buckets["no_route"].append(t)
+        elif tgt.end_frame >= src.start_frame or (
+            tgt.start_frame <= src.end_frame and src.start_frame <= tgt.end_frame
+        ):
+            buckets["overlap"].append(t)
+        elif all(
+            (src.start_frame - tgt.end_frame) < r.search_range_sec[0] * fps
+            for r in usable
+        ):
+            buckets["below_min_time"].append(t)
+        else:
+            buckets["other"].append(t)
+    return buckets
+
+
+def print_missed_breakdown(buckets: dict[str, list[GTTransition]], n_gt: int) -> None:
+    labels = {
+        "no_pred_track": "対応する予測トラックが無い（検出漏れ・フィルタ除去）",
+        "zone_none": "どちらかの端点が遷移領域に該当しない",
+        "no_route": "transitions.yaml に経路が無い",
+        "overlap": "出現区間が重なっている",
+        "below_min_time": "探索時間の下限を満たさない",
+        "other": "その他",
+    }
+    total = sum(len(v) for v in buckets.values())
+    print(f"\n  候補に入らなかった {total} 件の内訳:")
+    for reason, label in labels.items():
+        items = buckets[reason]
+        if not items:
+            continue
+        print(f"    {label}: {len(items)} 件 ({100*len(items)/n_gt:.1f}%)")
+        by_pair = collections.Counter((t.from_cam, t.to_cam) for t in items)
+        for (a, b), n in by_pair.most_common(4):
+            loop = "（自己ループ）" if a == b else ""
+            print(f"      {a} -> {b}{loop}: {n} 件")
+        for t in items[:2]:
+            print(f"      例: {t.from_cam}#{t.from_track} -> {t.to_cam}#{t.to_track} (GID {t.global_id})")

@@ -24,6 +24,7 @@ __all__ = [
     "PointMatch",
     "analyse",
     "angle_gap",
+    "circular_diff",
     "match_zones",
     "track_direction",
     "print_camera_report",
@@ -109,7 +110,7 @@ def track_direction(
     return direction_deg(dx, dy)
 
 
-def _circular_diff(a: float, b: float) -> float:
+def circular_diff(a: float, b: float) -> float:
     """2つの角度の差（0〜180度）。"""
     d = abs((a - b) % 360.0)
     return min(d, 360.0 - d)
@@ -119,7 +120,7 @@ def angle_gap(deg: float, lo: float, hi: float) -> float:
     """角度が範囲からどれだけ外れているか（度）。範囲内なら 0。"""
     if angle_in_range(deg, lo, hi):
         return 0.0
-    return min(_circular_diff(deg, lo), _circular_diff(deg, hi))
+    return min(circular_diff(deg, lo), circular_diff(deg, hi))
 
 
 @dataclass
