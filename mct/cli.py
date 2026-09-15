@@ -13,6 +13,7 @@ DEFAULT_CAMERAS = "configs/cameras.yaml"
 ALL_CAMERAS = ("camA", "camB", "camC", "camD", "camE", "camF", "camG", "camH")
 ALL_DATES = ("0720", "0727", "0730", "0803")
 DEFAULT_VIDEO_ROOT = "data/videos"
+DEFAULT_GT_ROOT = "data/gt"
 
 
 def _video_path(args: argparse.Namespace, camera: str | None = None) -> Path:
@@ -143,6 +144,74 @@ def cmd_filter(args: argparse.Namespace) -> int:
         dates, _cameras(args), args.out, args.config, args.params, force=args.force
     )
     print_summary(reports)
+    return 0
+
+
+def _gt_global_ids_as_predictions(gt) -> dict[str, dict[str, str]]:
+    """GT の Global ID をそのまま予測とみなす（動作確認用）。"""
+    assignments: dict[str, dict[str, str]] = {}
+    for (camera, track_id), global_id in gt.global_ids.items():
+        assignments.setdefault(camera, {})[str(track_id)] = global_id
+    return assignments
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    from mct.config import load_params
+    from mct.evaluation import (
+        evaluate, match_tracks, print_eval_result, print_iou_distribution, print_summary,
+    )
+    from mct.gt import load_ground_truth
+    from mct.io_utils import load_tracking_result
+    from mct.predictions import load_predictions
+
+    params = load_params(args.params).get("evaluation") or {}
+    dates = ALL_DATES if args.all_dates else [args.date]
+    results = []
+
+    for date in dates:
+        gt = load_ground_truth(args.gt_root, date)
+
+        if args.use_gt_tracks:
+            assignments = _gt_global_ids_as_predictions(gt)
+            result = evaluate(assignments, gt, use_gt_tracks=True)
+        else:
+            path = args.pred or (args.pred_pattern or "").format(date=date)
+            if not path:
+                raise SystemExit("--pred か --pred-pattern、または --use-gt-tracks を指定してください")
+            assignments = load_predictions(path).assignments
+
+            matchings = {}
+            for camera in ALL_CAMERAS:
+                source = Path(args.out) / date / camera / args.pred_tracks
+                if not source.is_file():
+                    continue
+                matchings[camera] = match_tracks(
+                    load_tracking_result(source), gt, camera, params
+                )
+            result = evaluate(assignments, gt, matchings)
+
+        print_eval_result(result)
+        results.append(result)
+
+    print_summary(results)
+    if args.report_iou:
+        print_iou_distribution(results)
+    return 0
+
+
+def cmd_eval_candidates(args: argparse.Namespace) -> int:
+    import json
+
+    from mct.evaluation import candidate_recall, print_candidate_recall
+    from mct.gt import load_ground_truth
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    for date in dates:
+        path = args.candidates or (args.candidates_pattern or "").format(date=date)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        candidates = data.get("links", data) if isinstance(data, dict) else data
+        print_candidate_recall(date, candidate_recall(candidates, load_ground_truth(args.gt_root, date)))
     return 0
 
 
@@ -321,6 +390,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="キャッシュを無視して作り直す"
     )
     p_filter.set_defaults(func=cmd_filter)
+
+    p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
+    p_eval.add_argument("--date", help='撮影日 (例: "0720")')
+    p_eval.add_argument("--all-dates", action="store_true", help="全4日を評価する")
+    p_eval.add_argument("--pred", help="予測結果 JSON のパス")
+    p_eval.add_argument(
+        "--pred-pattern", help='日付を埋めるパターン (例: "outputs/{date}/global_ids.json")'
+    )
+    p_eval.add_argument(
+        "--use-gt-tracks", action="store_true",
+        help="GT の Global ID をそのまま予測として使う（再同定単体評価モード）",
+    )
+    p_eval.add_argument(
+        "--pred-tracks", default="tracks_filtered.json",
+        help="対応付けに使う追跡結果 (default: tracks_filtered.json)",
+    )
+    p_eval.add_argument(
+        "--report-iou", action="store_true", help="対応付けの IoU 分布を出す"
+    )
+    p_eval.add_argument(
+        "--gt-root", default=DEFAULT_GT_ROOT, help=f"GT のルート (default: {DEFAULT_GT_ROOT})"
+    )
+    p_eval.add_argument(
+        "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+    )
+    p_eval.add_argument(
+        "--params", default=DEFAULT_CONFIG,
+        help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    p_eval.set_defaults(func=cmd_eval)
+
+    p_evc = sub.add_parser(
+        "eval-candidates", help="GT の正解遷移が候補に含まれた割合を出す"
+    )
+    p_evc.add_argument("--date", help='撮影日 (例: "0720")')
+    p_evc.add_argument("--all-dates", action="store_true", help="全4日を評価する")
+    p_evc.add_argument("--candidates", help="候補 JSON のパス")
+    p_evc.add_argument(
+        "--candidates-pattern", help='日付を埋めるパターン (例: "outputs/{date}/candidates.json")'
+    )
+    p_evc.add_argument(
+        "--gt-root", default=DEFAULT_GT_ROOT, help=f"GT のルート (default: {DEFAULT_GT_ROOT})"
+    )
+    p_evc.set_defaults(func=cmd_eval_candidates)
 
     p_cache = sub.add_parser("cache", help="中間結果のキャッシュを確認・削除する")
     cache_sub = p_cache.add_subparsers(dest="cache_command", required=True, metavar="ACTION")

@@ -28,14 +28,14 @@ cameras:
         region:
           type: rect
           points: [[460, 420], [650, 780]]
-        exit_dir: [160, 234] # 退出時の進行方向の許容範囲（度）
+        exit_dir: [150, 200] # 退出時の進行方向の許容範囲（度）
         entry_dir: [336, 54] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
           - { cam: camA, room: design_room } # 自己ループ
       - id: a_to_h
         region: { type: rect, points: [[0, 650], [500, 1080]] }
-        exit_dir: [180, 250]
+        exit_dir: [201, 260]
         entry_dir: [0, 70]
         to:
           - { cam: camH, room: null }
@@ -108,7 +108,7 @@ cameras:
         region:
           type: rect
           points: [[0, 280], [360, 860]]
-        exit_dir: [181, 260] # 退出時の進行方向の許容範囲（度）
+        exit_dir: [186, 250] # 退出時の進行方向の許容範囲（度）
         entry_dir: [0, 80] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camC, room: null }
@@ -117,7 +117,7 @@ cameras:
         region:
           type: rect
           points: [[0, 730], [750, 1080]]
-        exit_dir: [130, 180] # 退出時の進行方向の許容範囲（度）
+        exit_dir: [130, 185] # 退出時の進行方向の許容範囲（度）
         entry_dir: [310, 0] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camD, room: null }
@@ -279,7 +279,7 @@ cameras:
           type: rect
           points: [[1400, 600], [1919, 1080]]
         exit_dir: [0, 70] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [200, 270] # 出現時の進行方向の許容範囲（度）
+        entry_dir: [180, 270] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
           - { cam: camC, room: null }
@@ -443,9 +443,9 @@ cameras:
       - id: f_to_g
         region:
           type: rect
-          points: [[470, 750], [1100, 1080]]
-        exit_dir: [90, 180] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [260, 350] # 出現時の進行方向の許容範囲（度）
+          points: [[470, 950], [1100, 1080]]
+        exit_dir: [90, 190] # 退出時の進行方向の許容範囲（度）
+        entry_dir: [260, 10] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camG, room: null }
           - { cam: camF, room: prof's office } # 自己ループ
@@ -472,8 +472,8 @@ cameras:
         region:
           type: rect
           points: [[650, 225], [1000, 450]]
-        exit_dir: [230, 300] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [60, 120] # 出現時の進行方向の許容範囲（度）
+        exit_dir: [250, 330] # 退出時の進行方向の許容範囲（度）
+        entry_dir: [80, 160] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camF, room: null }
       - id: g_to_g
@@ -487,9 +487,9 @@ cameras:
       - id: g_to_h
         region:
           type: rect
-          points: [[200, 800], [1000, 1080]]
-        exit_dir: [100, 170] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [270, 350] # 出現時の進行方向の許容範囲（度）
+          points: [[20, 800], [1000, 1080]]
+        exit_dir: [120, 200] # 退出時の進行方向の許容範囲（度）
+        entry_dir: [300, 10] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camH, room: null }
     homography:

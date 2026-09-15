@@ -49,3 +49,8 @@ fusion:
   alpha: 0.5 # 時空間の重み（幾何平均の指数）
   alpha_self: 0.3 # 自己ループ時の時空間の重み
   no_match_score: 0.10 # 未対応のスコア
+
+# --- 評価（GT との突き合わせ） ---
+evaluation:
+  iou_threshold: 0.5    # 共存フレームでこれ以上なら「重なった」とみなす
+  match_min_ratio: 0.3  # 重なりが GT トラック長のこの割合未満なら対応なし

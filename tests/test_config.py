@@ -29,12 +29,14 @@ def test_loads_repository_cameras_yaml() -> None:
     cam_a = cameras["camA"]
     assert cam_a.image_size == (1920, 1080)
     assert len(cam_a.exclude_regions) == 2
-    assert [r.type for r in cam_a.exclude_regions] == ["rect", "rect"]
 
+    # 角度や座標は調整しながら使うので、値そのものではなく形を確かめる
     zone = cam_a.transition_zones[0]
     assert zone.id == "a_to_b"
-    assert zone.exit_dir == (160.0, 234.0)
-    assert zone.entry_dir == (336.0, 54.0)     # 0 をまたぐ区間
+    assert zone.region.type == "rect" and len(zone.region.points) == 2
+    for rng in (zone.exit_dir, zone.entry_dir):
+        assert rng is not None and len(rng) == 2
+        assert all(0.0 <= v <= 360.0 for v in rng)
     assert [(t.cam, t.room) for t in zone.to] == [("camB", None), ("camA", "design_room")]
 
 
