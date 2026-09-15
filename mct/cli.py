@@ -10,14 +10,23 @@ __all__ = ["build_parser", "main"]
 DEFAULT_OUT_ROOT = "outputs"
 DEFAULT_CONFIG = "configs/params.yaml"
 DEFAULT_CAMERAS = "configs/cameras.yaml"
+ALL_CAMERAS = ("camA", "camB", "camC", "camD", "camE", "camF", "camG", "camH")
+ALL_DATES = ("0720", "0727", "0730", "0803")
 DEFAULT_VIDEO_ROOT = "data/videos"
 
 
-def _video_path(args: argparse.Namespace) -> Path:
+def _video_path(args: argparse.Namespace, camera: str | None = None) -> Path:
     """--video 未指定なら data/videos/{date}/{camera}.mp4 を使う。"""
     if getattr(args, "video", None):
         return Path(args.video)
-    return Path(DEFAULT_VIDEO_ROOT) / args.date / f"{args.camera}.mp4"
+    return Path(DEFAULT_VIDEO_ROOT) / args.date / f"{camera or args.camera}.mp4"
+
+
+def _cameras(args: argparse.Namespace) -> list[str]:
+    """--all-cameras / --all-dates が付いていれば全8台、でなければ1台。"""
+    if getattr(args, "all_cameras", False) or getattr(args, "all_dates", False):
+        return list(ALL_CAMERAS)
+    return [args.camera]
 
 
 def cmd_track(args: argparse.Namespace) -> int:
@@ -85,7 +94,42 @@ def cmd_viz_endpoints(args: argparse.Namespace) -> int:
 def cmd_viz_region(args: argparse.Namespace) -> int:
     from mct.viz import viz_region
 
-    viz_region(_video_path(args), args.date, args.camera, args.out, args.config)
+    for camera in _cameras(args):
+        viz_region(
+            _video_path(args, camera), args.date, camera, args.out, args.config
+        )
+    return 0
+
+
+def cmd_filter(args: argparse.Namespace) -> int:
+    from mct.diagnostics import print_summary
+    from mct.pipeline import run
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    reports = run(
+        dates, _cameras(args), args.out, args.config, args.params, force=args.force
+    )
+    print_summary(reports)
+    return 0
+
+
+def cmd_cache(args: argparse.Namespace) -> int:
+    from mct.cache import clear, list_entries
+
+    if args.cache_command == "list":
+        entries = list_entries(args.layer)
+        if not entries:
+            print("キャッシュはありません。")
+            return 0
+        total = 0
+        for layer, path, size in entries:
+            print(f"  {layer:<4} {path.name:<40} {size/1024:8.1f} KB")
+            total += size
+        print(f"  {len(entries)} 件 / 合計 {total/1024/1024:.1f} MB")
+        return 0
+
+    n = clear(args.layer)
+    print(f"{n} 層のキャッシュを削除しました。" if n else "削除するキャッシュはありません。")
     return 0
 
 
@@ -171,7 +215,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default=DEFAULT_CAMERAS,
         help=f"カメラ定義 YAML (default: {DEFAULT_CAMERAS})",
     )
+    p_viz_r.add_argument(
+        "--all-cameras", action="store_true", help="camA〜camH をまとめて処理する"
+    )
     p_viz_r.set_defaults(func=cmd_viz_region)
+
+    p_filter = sub.add_parser(
+        "filter", help="観測区間を適用し静止誤検出を除いて tracks_filtered.json を書く"
+    )
+    p_filter.add_argument("--date", help='撮影日 (例: "0720")')
+    p_filter.add_argument("--camera", help='カメラID (例: "camA")')
+    p_filter.add_argument(
+        "--all-cameras", action="store_true", help="その日の camA〜camH をまとめて処理する"
+    )
+    p_filter.add_argument(
+        "--all-dates", action="store_true", help="全4日 × camA〜camH を処理する"
+    )
+    p_filter.add_argument(
+        "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+    )
+    p_filter.add_argument(
+        "--config", default=DEFAULT_CAMERAS,
+        help=f"カメラ定義 YAML (default: {DEFAULT_CAMERAS})",
+    )
+    p_filter.add_argument(
+        "--params", default=DEFAULT_CONFIG,
+        help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    p_filter.add_argument(
+        "--force", action="store_true", help="キャッシュを無視して作り直す"
+    )
+    p_filter.set_defaults(func=cmd_filter)
+
+    p_cache = sub.add_parser("cache", help="中間結果のキャッシュを確認・削除する")
+    cache_sub = p_cache.add_subparsers(dest="cache_command", required=True, metavar="ACTION")
+    p_cache_list = cache_sub.add_parser("list", help="キャッシュの一覧を表示する")
+    p_cache_list.add_argument("--layer", help='層を絞る (例: "L2")')
+    p_cache_list.set_defaults(func=cmd_cache)
+    p_cache_clear = cache_sub.add_parser("clear", help="キャッシュを削除する")
+    p_cache_clear.add_argument("--layer", help='層を絞る (例: "L2")')
+    p_cache_clear.set_defaults(func=cmd_cache)
 
     return parser
 

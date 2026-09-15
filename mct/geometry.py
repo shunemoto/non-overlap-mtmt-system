@@ -11,9 +11,21 @@ from collections.abc import Iterable, Sequence
 import cv2
 import numpy as np
 
-from mct.config import Region
+from mct.config import CameraConfig, Region
 
-__all__ = ["point_in_regions", "angle_in_range", "region_center", "direction_deg"]
+__all__ = [
+    "point_in_regions",
+    "angle_in_range",
+    "region_center",
+    "direction_deg",
+    "compute_homography",
+    "get_homography",
+    "to_world",
+    "reprojection_error",
+]
+
+# world_unit からメートルへの倍率。実空間の計測は cm 単位で記録してある。
+UNIT_TO_METER = {"cm": 0.01, "m": 1.0}
 
 
 def point_in_regions(pt: Sequence[float], regions: Iterable[Region]) -> bool:
@@ -65,3 +77,74 @@ def region_center(region: Region) -> tuple[int, int]:
     if abs(moments["m00"]) < 1e-9:          # 面積0（一直線に並ぶ頂点）
         return int(points[:, 0].mean()), int(points[:, 1].mean())
     return int(moments["m10"] / moments["m00"]), int(moments["m01"] / moments["m00"])
+
+
+def compute_homography(
+    image_points: Sequence[Sequence[float]],
+    world_points: Sequence[Sequence[float]],
+    world_unit: str = "cm",
+) -> np.ndarray:
+    """画像座標を BEV 実空間座標（メートル）に写す 3x3 行列を求める。
+
+    `world_points` は cm 単位で記録されているので、ここで必ずメートルに
+    直してから当てはめる。これを忘れると静止判定の閾値 1.0 m が 1 cm として
+    働き、ほとんどのトラックが静止扱いになる。単位はテストで固定してある。
+    """
+    if world_unit not in UNIT_TO_METER:
+        raise ValueError(f'world_unit は "cm" か "m" ですが "{world_unit}" でした')
+    if len(image_points) != len(world_points):
+        raise ValueError(
+            f"対応点の数が違います: image {len(image_points)} / world {len(world_points)}"
+        )
+    if len(world_points) < 4:
+        raise ValueError(f"ホモグラフィには4点以上必要です（{len(world_points)} 点）")
+
+    img = np.asarray(image_points, dtype=np.float64)
+    world = np.asarray(world_points, dtype=np.float64) * UNIT_TO_METER[world_unit]
+
+    H, _ = cv2.findHomography(img, world, cv2.RANSAC, 5.0)
+    if H is None:
+        raise ValueError("ホモグラフィを計算できませんでした（対応点を確認してください）")
+    return H
+
+
+def get_homography(
+    cameras: dict[str, CameraConfig], cam: str, date: str
+) -> np.ndarray | None:
+    """指定したカメラ・日付のホモグラフィ。未設定なら None。
+
+    カメラは日付ごとに画角がわずかにずれているので、画像側の対応点だけを
+    日付で切り替える。
+    """
+    config = cameras.get(cam)
+    if config is None:
+        return None
+    homography = config.homography
+    image_points = homography.image_points(date)
+    if not image_points or not homography.world_points:
+        return None
+    return compute_homography(image_points, homography.world_points, homography.world_unit)
+
+
+def to_world(points: Sequence[Sequence[float]], H: np.ndarray) -> np.ndarray:
+    """画像座標の並びを BEV 実空間座標（メートル）に変換する。"""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
+    if len(pts) == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    return cv2.perspectiveTransform(pts, H).reshape(-1, 2)
+
+
+def reprojection_error(
+    H: np.ndarray,
+    image_points: Sequence[Sequence[float]],
+    world_points_m: Sequence[Sequence[float]],
+) -> tuple[float, float]:
+    """計測点の再投影誤差（平均, 最大）を cm で返す。
+
+    誤差が大きければ計測点の取り違えを疑える。`world_points_m` は
+    メートル単位であることに注意（cm のまま渡すと 100 倍の誤差に見える）。
+    """
+    projected = to_world(image_points, H)
+    world = np.asarray(world_points_m, dtype=np.float64)
+    errors = np.linalg.norm(projected - world, axis=1) * 100.0   # m -> cm
+    return float(errors.mean()), float(errors.max())

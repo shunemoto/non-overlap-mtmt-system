@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ __all__ = [
     "Homography",
     "CameraConfig",
     "load_cameras",
+    "TransitionRoute",
+    "load_transitions",
 ]
 
 DEFAULT_TRACKING: dict[str, Any] = {
@@ -105,10 +108,20 @@ class TransitionZone:
 
 @dataclass
 class Homography:
-    """画像座標から BEV 実空間座標への対応点。未計測なら空のまま。"""
+    """画像座標から BEV 実空間座標への対応点。未計測なら空のまま。
 
-    image_points: list[list[float]] = field(default_factory=list)
+    カメラは日付ごとに画角がわずかにずれているため、実空間側の計測点は
+    共通で、画像側の対応点だけを日付ごとに持つ。観測区間と遷移領域は
+    ずれを織り込んで定義してあるので補正しない。
+    """
+
+    world_unit: str = "cm"
     world_points: list[list[float]] = field(default_factory=list)
+    image_points_by_date: dict[str, list[list[float]]] = field(default_factory=dict)
+
+    def image_points(self, date: str) -> list[list[float]] | None:
+        """その日付の画像側対応点。無ければ None。"""
+        return self.image_points_by_date.get(date)
 
 
 @dataclass
@@ -207,6 +220,56 @@ def _parse_zone(raw: Any, camera: str, index: int) -> TransitionZone:
     )
 
 
+def _points(raw: Any, camera: str, where: str) -> list[list[float]]:
+    if not all(isinstance(p, (list, tuple)) and len(p) == 2 for p in raw or []):
+        raise CameraConfigError(f"{camera}: {where} は [x, y] の並びにしてください")
+    return [[float(x), float(y)] for x, y in (raw or [])]
+
+
+def _parse_homography(raw: Any, camera: str) -> Homography:
+    """homography 節を読む。未記入のカメラは空の Homography として通す。
+
+    画像側の計測点には画像範囲の検査をかけない。画角の端で計測した点が
+    数 px はみ出すことがあり、ホモグラフィの計算には実害がないため。
+    """
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise CameraConfigError(f"{camera}: homography は辞書にしてください")
+
+    unit = str(raw.get("world_unit", "cm"))
+    if unit not in ("cm", "m"):
+        raise CameraConfigError(
+            f'{camera}: homography の world_unit は "cm" か "m" ですが "{unit}" でした'
+        )
+
+    world = _points(raw.get("world_points"), camera, "homography の world_points")
+    by_date_raw = raw.get("image_points_by_date") or {}
+    if not isinstance(by_date_raw, dict):
+        raise CameraConfigError(
+            f"{camera}: homography の image_points_by_date は日付をキーとする辞書にしてください"
+        )
+
+    by_date: dict[str, list[list[float]]] = {}
+    for date, pts_raw in by_date_raw.items():
+        date = str(date)
+        pts = _points(pts_raw, camera, f"homography の image_points_by_date['{date}']")
+        # 点数が食い違うと対応が1つずれたまま計算が通ってしまう
+        if len(pts) != len(world):
+            raise CameraConfigError(
+                f"{camera}: homography の image_points_by_date['{date}'] は {len(pts)} 点ですが "
+                f"world_points は {len(world)} 点です"
+            )
+        by_date[date] = pts
+
+    # ホモグラフィの算出には4点以上が要る。未記入（0点）は許す。
+    if world and len(world) < 4:
+        raise CameraConfigError(
+            f"{camera}: homography は4点以上必要ですが world_points が {len(world)} 点でした"
+        )
+
+    return Homography(world_unit=unit, world_points=world, image_points_by_date=by_date)
+
+
 def _parse_camera(name: str, raw: Any) -> CameraConfig:
     raw = raw or {}
     if not isinstance(raw, dict):
@@ -239,11 +302,7 @@ def _parse_camera(name: str, raw: Any) -> CameraConfig:
         )
         zones.append(zone)
 
-    homo_raw = raw.get("homography") or {}
-    homography = Homography(
-        image_points=[[float(x), float(y)] for x, y in (homo_raw.get("image_points") or [])],
-        world_points=[[float(x), float(y)] for x, y in (homo_raw.get("world_points") or [])],
-    )
+    homography = _parse_homography(raw.get("homography"), name)
 
     return CameraConfig(
         name=name,
@@ -273,3 +332,122 @@ def load_cameras(path: str | Path) -> dict[str, CameraConfig]:
         raise CameraConfigError(f"{p}: cameras はカメラ名をキーとする辞書にしてください")
 
     return {name: _parse_camera(name, body) for name, body in cameras.items()}
+
+
+# --------------------------------------------------------------------------
+# transitions.yaml — カメラ間の遷移経路
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class TransitionRoute:
+    """ある遷移領域から別の遷移領域への経路。
+
+    `search_range_sec` の上限が None なら上限なし（居室に長時間滞在してから
+    戻ってくる自己ループで使う）。
+    """
+
+    from_cam: str
+    from_zone: str
+    to_cam: str
+    to_zone: str
+    distance_m: float
+    search_range_sec: tuple[float, float | None]
+    c_dwell: float
+
+    @property
+    def is_self_loop(self) -> bool:
+        return self.from_cam == self.to_cam and self.from_zone == self.to_zone
+
+
+def _parse_endpoint(
+    raw: Any, cameras: dict[str, CameraConfig], where: str
+) -> tuple[str, str]:
+    if not isinstance(raw, dict) or "cam" not in raw or "zone" not in raw:
+        raise CameraConfigError(f"{where} は cam と zone を持つ辞書にしてください")
+
+    cam, zone = str(raw["cam"]), str(raw["zone"])
+    if cam not in cameras:
+        raise CameraConfigError(f"{where}: カメラ '{cam}' が cameras.yaml にありません")
+    if zone not in {z.id for z in cameras[cam].transition_zones}:
+        known = ", ".join(z.id for z in cameras[cam].transition_zones) or "（定義なし）"
+        raise CameraConfigError(
+            f"{where}: {cam} に遷移領域 '{zone}' がありません（定義済み: {known}）"
+        )
+    return cam, zone
+
+
+def load_transitions(
+    path: str | Path, cameras: dict[str, CameraConfig]
+) -> list[TransitionRoute]:
+    """transitions.yaml を読む。参照先の遷移領域が実在するかを `cameras` で検証する。
+
+    A→B があるのに B→A が無い場合は警告する。片側だけの定義は書き忘れの
+    ことが多いが、一方通行の経路も有り得るので例外にはしない。
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"遷移定義が見つかりません: {p}")
+
+    with p.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    entries = raw.get("transitions")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise CameraConfigError(f"{p}: transitions は一覧にしてください")
+
+    routes: list[TransitionRoute] = []
+    for i, entry in enumerate(entries):
+        where = f"transitions[{i}]"
+        if not isinstance(entry, dict):
+            raise CameraConfigError(f"{where} は辞書にしてください")
+
+        from_cam, from_zone = _parse_endpoint(entry.get("from"), cameras, f"{where} の from")
+        to_cam, to_zone = _parse_endpoint(entry.get("to"), cameras, f"{where} の to")
+
+        rng = entry.get("search_range_sec")
+        if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+            raise CameraConfigError(
+                f"{where}: search_range_sec は [下限, 上限] の2要素にしてください"
+            )
+        lo = float(rng[0])
+        hi = None if rng[1] is None else float(rng[1])
+        if hi is not None and lo > hi:
+            raise CameraConfigError(
+                f"{where}: search_range_sec の下限 {lo:g} が上限 {hi:g} を超えています"
+            )
+
+        distance_m = float(entry.get("distance_m", 0.0))
+        c_dwell = float(entry.get("c_dwell", 0.0))
+        for key, value in (("distance_m", distance_m), ("c_dwell", c_dwell)):
+            if value <= 0:
+                raise CameraConfigError(f"{where}: {key} は正の数にしてください（{value:g}）")
+
+        routes.append(
+            TransitionRoute(
+                from_cam=from_cam, from_zone=from_zone,
+                to_cam=to_cam, to_zone=to_zone,
+                distance_m=distance_m,
+                search_range_sec=(lo, hi),
+                c_dwell=c_dwell,
+            )
+        )
+
+    _warn_asymmetric(routes)
+    return routes
+
+
+def _warn_asymmetric(routes: list[TransitionRoute]) -> None:
+    pairs = {(r.from_cam, r.from_zone, r.to_cam, r.to_zone) for r in routes}
+    for route in routes:
+        if route.is_self_loop:
+            continue
+        back = (route.to_cam, route.to_zone, route.from_cam, route.from_zone)
+        if back not in pairs:
+            warnings.warn(
+                f"transitions: {route.from_cam}/{route.from_zone} -> "
+                f"{route.to_cam}/{route.to_zone} の逆向きが定義されていません",
+                stacklevel=2,
+            )

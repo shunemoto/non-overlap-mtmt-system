@@ -10,12 +10,42 @@ tracking:
 
   # --- 保存フレームの選抜 ---
   n_saved_per_track: 90
-  n_bins: 9                 # トラックを時間で n_bins 等分し各区画から選ぶ
-  crop_padding_ratio: 0.10  # crop は bbox を四方にこの割合だけ広げて切り出す
+  n_bins: 9 # トラックを時間で n_bins 等分し各区画から選ぶ
+  crop_padding_ratio: 0.10 # crop は bbox を四方にこの割合だけ広げて切り出す
   jpeg_quality: 95
 
   # --- 推論 ---
-  device: "mps"             # Apple Silicon。CUDA 機なら "cuda"、無ければ "cpu"
+  device: "mps" # Apple Silicon。CUDA 機なら "cuda"、無ければ "cpu"
   imgsz: 640
-  stride: 1                 # N フレームに1枚だけ推論（1 = 全フレーム）
-  mask_iou_threshold: 0.30  # これ未満の IoU しか無ければマスク無しとする
+  stride: 1 # N フレームに1枚だけ推論（1 = 全フレーム）
+  mask_iou_threshold: 0.30 # これ未満の IoU しか無ければマスク無しとする
+
+# --- フェーズ2（今回使う） ---
+filtering:
+  min_track_len: 31
+  n_frames_per_track: 30
+  static_max_distance_m: 1.0
+  static_min_len: 60
+  static_max_std_m: 0.3
+  static_max_conf: 0.7
+  static_max_distance_px: 80
+  static_max_std_px: 25
+  dir_frames: 30 # 進行方向の算出に使うフレーム数
+
+# --- フェーズ4以降（未使用。値は暫定） ---
+spatiotemporal:
+  fps: 30
+  speed_target_sec: 1.0 # 速度計測の目標刻み（秒）
+  speed_min_segments: 3 # 最低でもこの数の区間に分割する
+  speed_max_mps: 2.0 # 到達時間の下限計算に使う上限速度
+
+appearance:
+  hist_bins: [12, 12]
+  sift_patch_ratio: 0.07 # r = 0.07 * h
+  sift_min_bbox_height: 200
+  upper_lower_split: "hip" # 上下分割の基準
+
+fusion:
+  alpha: 0.5 # 時空間の重み（幾何平均の指数）
+  alpha_self: 0.3 # 自己ループ時の時空間の重み
+  no_match_score: 0.10 # 未対応のスコア
