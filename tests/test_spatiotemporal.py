@@ -341,3 +341,106 @@ def test_score_candidates_covers_every_candidate() -> None:
     scores = score_candidates([_candidate(route, src, tgt)], [tgt, src], SIGMA, PARAMS)
 
     assert len(scores) == 1 and scores[0].kind == KIND_IN_RANGE
+
+
+# --- 順位の集計 -----------------------------------------------------------
+
+
+def _labelled(kind: str, likelihood: float, correct: bool, src=("camB", 1),
+              tgt=("camA", 1), date="0720"):
+    from mct.spatiotemporal import STScore
+    from mct.st_report import Labelled
+
+    return Labelled(
+        STScore(src=src, tgt=tgt, kind=kind, likelihood=likelihood), correct, date
+    )
+
+
+def test_rank_without_ties() -> None:
+    from mct.st_report import _ranks
+
+    items = [_labelled(KIND_IN_RANGE, v, False) for v in (0.9, 0.5, 0.1)]
+    assert _ranks(items, items[0]) == (1.0, 1.0)
+    assert _ranks(items, items[1]) == (2.0, 2.0)
+    assert _ranks(items, items[2]) == (3.0, 3.0)
+
+
+def test_rank_with_ties_uses_average_and_worst() -> None:
+    """同値3件が首位なら、平均順位は2.0、最下位扱いは3.0。"""
+    from mct.st_report import _ranks
+
+    items = [_labelled(KIND_SELF_LOOP, 0.2, False) for _ in range(3)]
+    items.append(_labelled(KIND_SELF_LOOP, 0.1, False))
+
+    assert _ranks(items, items[0]) == (2.0, 3.0)
+    assert _ranks(items, items[3]) == (4.0, 4.0)
+
+
+def test_rank_of_single_candidate() -> None:
+    from mct.st_report import _ranks
+
+    items = [_labelled(KIND_IN_RANGE, 0.5, True)]
+    assert _ranks(items, items[0]) == (1.0, 1.0)
+
+
+def test_ranks_exclude_non_in_range_correct(capsys) -> None:
+    """正解が out_of_range にあるときは in_range の分母から外す。"""
+    from mct.st_report import print_ranks
+
+    labelled = [
+        _labelled(KIND_IN_RANGE, 0.9, False, src=("camB", 1)),
+        _labelled(KIND_OUT_OF_RANGE, 0.1, True, src=("camB", 1)),
+    ]
+    print_ranks(labelled)
+    out = capsys.readouterr().out
+
+    assert "②③ から除外した正解: 1 件" in out
+    assert "out_of_range 1 件" in out
+
+
+def test_ranks_count_only_contested_in_third_block(capsys) -> None:
+    """in_range が1件だけの src は③の分母に入らない。"""
+    from mct.st_report import print_ranks
+
+    labelled = [
+        # src A: in_range が1件だけ（自明に1位）
+        _labelled(KIND_IN_RANGE, 0.5, True, src=("camB", 1)),
+        _labelled(KIND_OUT_OF_RANGE, 0.1, False, src=("camB", 1)),
+        # src B: in_range が2件（競合あり）
+        _labelled(KIND_IN_RANGE, 0.9, False, src=("camB", 2)),
+        _labelled(KIND_IN_RANGE, 0.4, True, src=("camB", 2)),
+    ]
+    print_ranks(labelled)
+    out = capsys.readouterr().out
+
+    assert "② in_range のみを分母とする（2 件）" in out
+    assert "③ in_range が2件以上ある src のみ（本質的な指標）（1 件）" in out
+
+
+def test_competitor_histogram(capsys) -> None:
+    from mct.st_report import print_competitors
+
+    labelled = [
+        _labelled(KIND_IN_RANGE, 0.5, True, src=("camB", 1)),
+        _labelled(KIND_IN_RANGE, 0.9, False, src=("camB", 2)),
+        _labelled(KIND_IN_RANGE, 0.4, False, src=("camB", 2)),
+    ]
+    print_competitors(labelled)
+    out = capsys.readouterr().out
+
+    assert "in_range が 0件: 0 / 1件のみ: 1 / 2件以上: 1" in out
+
+
+def test_self_loop_ranks_report_both_tie_policies(capsys) -> None:
+    from mct.st_report import print_self_loop_ranks
+
+    labelled = [
+        _labelled(KIND_SELF_LOOP, 0.2, True, src=("camA", 1)),
+        _labelled(KIND_SELF_LOOP, 0.2, False, src=("camA", 1)),
+        _labelled(KIND_SELF_LOOP, 0.2, False, src=("camA", 1)),
+    ]
+    print_self_loop_ranks(labelled)
+    out = capsys.readouterr().out
+
+    assert "平均順位" in out and "同値を最下位とした順位" in out
+    assert "最高値で同値だった正解: 1 件" in out

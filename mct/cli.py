@@ -451,8 +451,8 @@ def cmd_st_scores(args: argparse.Namespace) -> int:
     from mct.spatiotemporal import KIND_IN_RANGE, estimate_sigma, score_candidates
     from mct.st_pipeline import load_candidates, write_scores
     from mct.st_report import (
-        Labelled, plot_separation, print_error_by_zone, print_kind_breakdown,
-        print_ranks, print_separation,
+        Labelled, plot_separation, print_competitors, print_error_by_zone,
+        print_kind_breakdown, print_ranks, print_self_loop_ranks, print_separation,
     )
 
     dates = ALL_DATES if args.all_dates else [args.date]
@@ -488,7 +488,9 @@ def cmd_st_scores(args: argparse.Namespace) -> int:
     print_separation(labelled)
     print_kind_breakdown(labelled)
     print_error_by_zone(labelled, float(params.get("fps", 30)))
+    print_competitors(labelled)
     print_ranks(labelled)
+    print_self_loop_ranks(labelled)
 
     png = plot_separation(labelled, Path(args.out) / "viz" / "st_likelihood_separation.png")
     print(f"\nwrote {png}")
