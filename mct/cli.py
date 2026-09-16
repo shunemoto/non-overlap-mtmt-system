@@ -8,6 +8,7 @@ from pathlib import Path
 __all__ = ["build_parser", "main"]
 
 DEFAULT_OUT_ROOT = "outputs"
+GT_OUT_ROOT = "outputs_gt"
 DEFAULT_CONFIG = "configs/params.yaml"
 DEFAULT_CAMERAS = "configs/cameras.yaml"
 ALL_CAMERAS = ("camA", "camB", "camC", "camD", "camE", "camF", "camG", "camH")
@@ -33,6 +34,16 @@ def _cameras(args: argparse.Namespace) -> list[str]:
     if not getattr(args, "camera", None):
         raise SystemExit("--camera か --all-cameras のどちらかを指定してください")
     return [args.camera]
+
+
+def _resolve_out(args: argparse.Namespace) -> None:
+    """--use-gt が付いていれば出力ルートを outputs_gt に切り替える。
+
+    GT 由来のトラックは予測側と同じ TrackingResult 形式なので、読む場所を
+    変えるだけで以降の処理はそのまま通る。--out を明示した場合はそちらを優先。
+    """
+    if getattr(args, "use_gt", False) and args.out == DEFAULT_OUT_ROOT:
+        args.out = GT_OUT_ROOT
 
 
 def _load_gt(args, date):
@@ -132,6 +143,7 @@ def cmd_viz_region(args: argparse.Namespace) -> int:
 
 
 def cmd_viz_zones(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.viz import viz_zones
 
     for camera in _cameras(args):
@@ -140,6 +152,7 @@ def cmd_viz_zones(args: argparse.Namespace) -> int:
 
 
 def cmd_zone_report(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.config import CameraConfig, load_cameras
     from mct.io_utils import load_tracking_result, output_dir
     from mct.pipeline import FILTERED_FILENAME, _filtering_params
@@ -163,6 +176,7 @@ def cmd_zone_report(args: argparse.Namespace) -> int:
 
 
 def cmd_filter(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.diagnostics import print_summary
     from mct.pipeline import run
 
@@ -183,6 +197,7 @@ def _gt_global_ids_as_predictions(gt) -> dict[str, dict[str, str]]:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.config import load_params
     from mct.evaluation import (
         evaluate, match_tracks, print_eval_result, print_iou_distribution, print_summary,
@@ -243,6 +258,7 @@ def cmd_eval_candidates(args: argparse.Namespace) -> int:
 
 
 def cmd_candidates(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     import warnings
 
     from mct.candidate_pipeline import (
@@ -357,13 +373,20 @@ def _correct_pairs_and_summaries(args, date, summaries):
         gt = _load_gt(args, date)
 
     to_pred = {}
-    for camera in ALL_CAMERAS:
-        source = Path(args.out) / date / camera / "tracks_filtered.json"
-        if not source.is_file():
-            continue
-        m = match_tracks(load_tracking_result(source), gt, camera, ev_params)
-        for pred_track, gt_track in m.pairs.items():
-            to_pred[(camera, gt_track)] = (camera, int(pred_track))
+    if getattr(args, "use_gt", False):
+        # GT 由来の入力では track_id が GT のものそのままなので、対応付けは恒等。
+        # match_tracks を通しても IoU 1.0 で同じ結果になるが、無駄が多い。
+        for camera in gt.boxes:
+            for gt_track in gt.evaluable(camera):
+                to_pred[(camera, gt_track)] = (camera, gt_track)
+    else:
+        for camera in ALL_CAMERAS:
+            source = Path(args.out) / date / camera / "tracks_filtered.json"
+            if not source.is_file():
+                continue
+            m = match_tracks(load_tracking_result(source), gt, camera, ev_params)
+            for pred_track, gt_track in m.pairs.items():
+                to_pred[(camera, gt_track)] = (camera, int(pred_track))
 
     correct = set()
     for t in gt_transitions(gt):
@@ -375,6 +398,7 @@ def _correct_pairs_and_summaries(args, date, summaries):
 
 
 def cmd_calibrate_distance(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     import warnings
 
     from mct.calibrate import (
@@ -431,6 +455,7 @@ def _sigma_samples(args, dates):
 
 
 def cmd_calibrate_sigma(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.spatiotemporal import estimate_sigma
     from mct.st_pipeline import print_sigma_report, write_sigma_csv
 
@@ -447,6 +472,7 @@ def cmd_calibrate_sigma(args: argparse.Namespace) -> int:
 
 
 def cmd_st_scores(args: argparse.Namespace) -> int:
+    _resolve_out(args)
     from mct.candidate_pipeline import _spatiotemporal
     from mct.spatiotemporal import KIND_IN_RANGE, estimate_sigma, score_candidates
     from mct.st_pipeline import load_candidates, write_scores
@@ -495,6 +521,55 @@ def cmd_st_scores(args: argparse.Namespace) -> int:
     png = plot_separation(labelled, Path(args.out) / "viz" / "st_likelihood_separation.png")
     print(f"\nwrote {png}")
     return 0
+
+
+def cmd_gt_features(args: argparse.Namespace) -> int:
+    _resolve_out(args)
+    from mct.config import CameraConfig, load_cameras
+    from mct.gt_features import extract_features, print_stats
+    from mct.io_utils import save_tracking_result
+    from mct.pipeline import FILTERED_FILENAME, _filtering_params
+
+    cameras = load_cameras(args.config)
+    params = dict(_filtering_params(args.params))
+    params.update(_gt_feature_params(args.params))
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    total = 0.0
+    for date in dates:
+        gt = _load_gt(args, date)
+        for camera in _cameras(args):
+            video = Path(DEFAULT_VIDEO_ROOT) / date / f"{camera}.mp4"
+            result, stats = extract_features(
+                video, gt, camera,
+                cameras.get(camera) or CameraConfig(name=camera),
+                params, args.out,
+            )
+            print_stats(stats)
+            if result is None:
+                print("  （GT が空、または残るトラックが無いので出力なし）")
+                continue
+            dest = Path(args.out) / date / camera / FILTERED_FILENAME
+            save_tracking_result(result, dest)
+            print(f"  wrote {dest}")
+            total += stats.seconds
+
+    print(f"\n合計 {total/60:.1f} 分")
+    return 0
+
+
+def _gt_feature_params(params_path) -> dict:
+    """GT からの特徴抽出で使う、追跡側と共通の設定。"""
+    from mct.config import tracking_params
+
+    tracking = tracking_params(params_path)
+    return {
+        key: tracking[key]
+        for key in (
+            "model_pose", "model_seg", "crop_padding_ratio", "imgsz",
+            "device", "jpeg_quality", "mask_iou_threshold",
+        )
+    }
 
 
 def cmd_cache(args: argparse.Namespace) -> int:
@@ -618,6 +693,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_viz_z.add_argument(
         "--all-cameras", action="store_true", help="camA〜camH をまとめて処理する"
     )
+    p_viz_z.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
     p_viz_z.set_defaults(func=cmd_viz_zones)
 
     p_zr = sub.add_parser(
@@ -642,6 +721,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_zr.add_argument(
         "--params", default=DEFAULT_CONFIG,
         help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    p_zr.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
     )
     p_zr.set_defaults(func=cmd_zone_report)
 
@@ -670,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_filter.add_argument(
         "--force", action="store_true", help="キャッシュを無視して作り直す"
+    )
+    p_filter.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
     )
     p_filter.set_defaults(func=cmd_filter)
 
@@ -704,6 +791,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_cand.add_argument(
         "--gt-root", default=DEFAULT_GT_ROOT, help=f"GT のルート (default: {DEFAULT_GT_ROOT})"
     )
+    p_cand.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
     p_cand.set_defaults(func=cmd_candidates)
 
     p_calib = sub.add_parser(
@@ -721,6 +812,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_calib.add_argument("--transitions", default=DEFAULT_TRANSITIONS)
     p_calib.add_argument("--params", default=DEFAULT_CONFIG)
     p_calib.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
+    p_calib.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
     p_calib.set_defaults(func=cmd_calibrate_distance)
 
     def _add_st_common(parser: argparse.ArgumentParser) -> None:
@@ -741,13 +836,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_st_common(p_sigma)
     p_sigma.add_argument("--all-dates", action="store_true", help="（既定で全4日を使う）")
+    p_sigma.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
     p_sigma.set_defaults(func=cmd_calibrate_sigma)
 
     p_st = sub.add_parser("st-scores", help="候補に時空間尤度を付けて書き出す")
     p_st.add_argument("--date", help='撮影日 (例: "0720")')
     p_st.add_argument("--all-dates", action="store_true", help="全4日を処理する")
     _add_st_common(p_st)
+    p_st.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
     p_st.set_defaults(func=cmd_st_scores)
+
+    p_gtf = sub.add_parser(
+        "gt-features", help="GT の bbox から crop・マスク・骨格点を作る（単体評価用）"
+    )
+    p_gtf.add_argument("--date", help='撮影日 (例: "0720")')
+    p_gtf.add_argument("--camera", help='カメラID (例: "camA")')
+    p_gtf.add_argument("--all-cameras", action="store_true", help="camA〜camH をまとめて処理する")
+    p_gtf.add_argument("--all-dates", action="store_true", help="全4日 × camA〜camH を処理する")
+    p_gtf.add_argument(
+        "--out", "--out-root", dest="out", default=GT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {GT_OUT_ROOT})",
+    )
+    p_gtf.add_argument("--config", default=DEFAULT_CAMERAS)
+    p_gtf.add_argument("--params", default=DEFAULT_CONFIG)
+    p_gtf.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
+    p_gtf.set_defaults(func=cmd_gt_features)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')
@@ -777,6 +896,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument(
         "--params", default=DEFAULT_CONFIG,
         help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    p_eval.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
     )
     p_eval.set_defaults(func=cmd_eval)
 

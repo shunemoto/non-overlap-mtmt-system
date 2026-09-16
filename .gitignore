@@ -29,3 +29,6 @@ logs/
 
 # 中間結果のキャッシュ
 cache/
+
+# GT 由来の特徴（単体評価用）
+outputs_gt/
