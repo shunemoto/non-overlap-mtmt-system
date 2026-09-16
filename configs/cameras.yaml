@@ -28,14 +28,15 @@ cameras:
         region:
           type: rect
           points: [[460, 420], [650, 780]]
-        exit_dir: [150, 200] # 退出時の進行方向の許容範囲（度）
+        exit_dir: [140, 186] # 退出時の進行方向の許容範囲（度）
         entry_dir: [336, 54] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
           - { cam: camA, room: design_room } # 自己ループ
       - id: a_to_h
         region: { type: rect, points: [[0, 650], [500, 1080]] }
-        exit_dir: [201, 260]
+        # a_to_b の退出上限 186 度と境を接する（実測の 187-194 度を拾う）
+        exit_dir: [187, 260]
         entry_dir: [0, 70]
         to:
           - { cam: camH, room: null }
@@ -278,7 +279,7 @@ cameras:
         region:
           type: rect
           points: [[1400, 600], [1919, 1080]]
-        exit_dir: [0, 70] # 退出時の進行方向の許容範囲（度）
+        exit_dir: [350, 70] # 退出時の進行方向の許容範囲（度）
         entry_dir: [180, 270] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
@@ -288,7 +289,8 @@ cameras:
         region:
           type: rect
           points: [[1500, 390], [1919, 650]]
-        exit_dir: [290, 359] # 退出時の進行方向の許容範囲（度）
+        # d_to_bcf の退出下限 350 度と重ならないよう上限を下げる
+        exit_dir: [290, 349] # 退出時の進行方向の許容範囲（度）
         entry_dir: [110, 179] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camC, room: null }
@@ -435,7 +437,7 @@ cameras:
           type: rect
           points: [[470, 400], [630, 750]]
         exit_dir: [160, 240] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [340, 50] # 出現時の進行方向の許容範囲（度）
+        entry_dir: [340, 60] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
           - { cam: camC, room: null }
@@ -569,8 +571,11 @@ cameras:
         region:
           type: rect
           points: [[1100, 850], [1420, 1080]]
-        exit_dir: [30, 100] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [200, 270] # 出現時の進行方向の許容範囲（度）
+        # 実測は出現 183-184 度・退出 4-7 度で、旧定義（出現 [200,270] /
+        # 退出 [30,100]）とは別方向を向いており4日とも該当0件だった。
+        # 標本が少ないので実測の周りに余裕を持たせる。
+        exit_dir: [340, 30] # 退出時の進行方向の許容範囲（度）
+        entry_dir: [160, 210] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camG, room: null }
       - id: h_to_a
