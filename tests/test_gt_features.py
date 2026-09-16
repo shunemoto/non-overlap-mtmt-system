@@ -204,3 +204,43 @@ def test_build_tracks_on_empty_camera() -> None:
 
     assert kept == {} and selected == {}
     assert stats.n_tracks_before == 0 and stats.n_selected == 0
+
+
+# --- gt_features: による設定の上書き ------------------------------------
+
+
+def _params_file(tmp_path, body: str):
+    path = tmp_path / "params.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_gt_features_section_overrides_tracking(tmp_path) -> None:
+    """GT 側だけマスクの閾値を緩められる。予測側の値は動かさない。"""
+    from mct.cli import _gt_feature_params
+    from mct.config import tracking_params
+
+    path = _params_file(
+        tmp_path,
+        "tracking:\n  mask_iou_threshold: 0.30\ngt_features:\n  mask_iou_threshold: 0.15\n",
+    )
+
+    assert _gt_feature_params(path)["mask_iou_threshold"] == 0.15
+    assert tracking_params(path)["mask_iou_threshold"] == 0.30
+
+
+def test_gt_features_falls_back_to_tracking(tmp_path) -> None:
+    from mct.cli import _gt_feature_params
+
+    path = _params_file(tmp_path, "tracking:\n  mask_iou_threshold: 0.30\n")
+
+    assert _gt_feature_params(path)["mask_iou_threshold"] == 0.30
+
+
+def test_gt_features_ignores_unknown_keys(tmp_path) -> None:
+    """関係ないキーを書いても抽出側の設定には入らない。"""
+    from mct.cli import _gt_feature_params
+
+    path = _params_file(tmp_path, "gt_features:\n  conf_threshold: 0.9\n")
+
+    assert "conf_threshold" not in _gt_feature_params(path)

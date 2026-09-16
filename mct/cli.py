@@ -567,17 +567,26 @@ def cmd_gt_features(args: argparse.Namespace) -> int:
 
 
 def _gt_feature_params(params_path) -> dict:
-    """GT からの特徴抽出で使う、追跡側と共通の設定。"""
-    from mct.config import tracking_params
+    """GT からの特徴抽出で使う設定。
+
+    既定は追跡側（`tracking:`）と共通だが、`gt_features:` に書いたキーだけを
+    上書きできる。GT の bbox は人物の輪郭より広めに取られていて seg の
+    マスクとの IoU が構造的に下がるので、マスク採用の閾値は GT 側だけ
+    緩める必要がある。予測側の値を巻き込まないよう節を分けている。
+    """
+    from mct.config import load_params, tracking_params
 
     tracking = tracking_params(params_path)
-    return {
+    params = {
         key: tracking[key]
         for key in (
             "model_pose", "model_seg", "crop_padding_ratio", "imgsz",
             "device", "jpeg_quality", "mask_iou_threshold",
         )
     }
+    overrides = load_params(params_path).get("gt_features") or {}
+    params.update({k: v for k, v in overrides.items() if k in params})
+    return params
 
 
 def cmd_cache(args: argparse.Namespace) -> int:

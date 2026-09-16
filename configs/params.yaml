@@ -57,6 +57,16 @@ fusion:
   alpha_self: 0.3 # 自己ループ時の時空間の重み
   no_match_score: 0.10 # 未対応のスコア
 
+# --- GT からの特徴抽出（gt-features / outputs_gt）---
+# ここに書いたキーだけが tracking: の値を上書きする。予測側（outputs）には
+# 影響しない。
+#
+# GT の bbox は人物の輪郭より広めに取られており、seg のマスクは輪郭に密着
+# するため IoU が構造的に下がる。閾値 0.30 ではマスク欠損 131 件のうち 96 件
+# が「seg は人物を正しく検出しているのに採用されない」ものだった。
+gt_features:
+  mask_iou_threshold: 0.15
+
 # --- 評価（GT との突き合わせ） ---
 evaluation:
   iou_threshold: 0.5    # 共存フレームでこれ以上なら「重なった」とみなす
