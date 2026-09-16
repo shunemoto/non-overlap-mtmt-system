@@ -21,7 +21,14 @@ from mct.diagnostics import match_zones, track_direction
 from mct.geometry import to_world
 from mct.schema import FramePoint
 
-__all__ = ["TrackSummary", "speed_mps", "summarize_track", "summarize_camera"]
+__all__ = [
+    "TrackSummary",
+    "segment_speeds",
+    "track_speed",
+    "harmonic_mean_speed",
+    "summarize_track",
+    "summarize_camera",
+]
 
 
 @dataclass
@@ -38,10 +45,21 @@ class TrackSummary:
     exit_dir_deg: float | None = None
     entry_zones: list[str] = field(default_factory=list)
     exit_zones: list[str] = field(default_factory=list)
-    entry_speed_mps: float | None = None
-    exit_speed_mps: float | None = None
+
+    speed_mps: float | None = None
+    """トラック全体から求めた歩行速度。
+
+    出現直後と退出直前で分けることも試したが、トラック長の中央値が
+    128フレームしかなく、1.5秒×3区間を半分だけで確保できるトラックが
+    3%しか無かった。区間を短くすると1区間あたりの誤差が増える
+    （0.5秒で25%、1.5秒で8.3%）ので、分離より精度を取って1つにまとめた。
+    """
+
     speed_fallback: bool = False
-    """前半・後半で区間数が足りず、トラック全体の速度で代用したか。"""
+    """区間がすべて停止とみなされ、同じカメラ・同じ日の中央値で代用したか。"""
+
+    speed_clipped: bool = False
+    """妥当範囲を外れてクリップされたか。ホモグラフィの外挿誤差の目印。"""
 
     @property
     def key(self) -> tuple[str, int]:
@@ -61,9 +79,9 @@ class TrackSummary:
             "exit_dir_deg": self.exit_dir_deg,
             "entry_zones": list(self.entry_zones),
             "exit_zones": list(self.exit_zones),
-            "entry_speed_mps": self.entry_speed_mps,
-            "exit_speed_mps": self.exit_speed_mps,
+            "speed_mps": self.speed_mps,
             "speed_fallback": self.speed_fallback,
+            "speed_clipped": self.speed_clipped,
         }
 
     @classmethod
@@ -81,9 +99,9 @@ class TrackSummary:
             exit_dir_deg=d.get("exit_dir_deg"),
             entry_zones=list(d.get("entry_zones") or []),
             exit_zones=list(d.get("exit_zones") or []),
-            entry_speed_mps=d.get("entry_speed_mps"),
-            exit_speed_mps=d.get("exit_speed_mps"),
+            speed_mps=d.get("speed_mps"),
             speed_fallback=bool(d.get("speed_fallback", False)),
+            speed_clipped=bool(d.get("speed_clipped", False)),
         )
 
 
@@ -104,22 +122,21 @@ def _n_segments(n_frames: int, params: dict[str, Any]) -> int:
     return max(minimum, _natural_segments(n_frames, params))
 
 
-def speed_mps(
+def segment_speeds(
     points: list[FramePoint], H: np.ndarray | None, params: dict[str, Any]
-) -> float | None:
-    """BEV 実空間での速度 [m/s]。求められなければ None。
+) -> list[float]:
+    """軌跡を等間隔に分けた各区間の速度 [m/s]。
 
-    軌跡を等間隔に分割して区間ごとの速度を出し、その**中央値**を取る。
-    全体の始終点だけで測ると立ち止まりや回り込みで過小評価になり、
-    フレームごとに測ると検出のぶれがそのまま速度になるため。
+    全体の始終点だけで測ると回り込みで過小評価になり、フレームごとに測ると
+    検出のぶれがそのまま速度になるので、目標の刻みで区切って測る。
     """
     if H is None or len(points) < 2:
-        return None
+        return []
 
     fps = float(params.get("fps", 30))
     n_seg = _n_segments(len(points), params)
     if n_seg < 1:
-        return None
+        return []
 
     world = to_world([p.foot_point for p in points], H)
     frames = [p.frame_idx for p in points]
@@ -133,24 +150,44 @@ def speed_mps(
         if seconds <= 0:
             continue
         speeds.append(float(np.linalg.norm(world[b] - world[a])) / seconds)
+    return speeds
 
-    return statistics.median(speeds) if speeds else None
 
-
-def _half_speed(
+def track_speed(
     points: list[FramePoint], H: np.ndarray | None, params: dict[str, Any]
-) -> tuple[float | None, float | None, bool]:
-    """前半・後半それぞれの速度。区間数が足りなければ全体の値で代用する。"""
-    minimum = int(params.get("speed_min_segments", 3))
-    half = len(points) // 2
+) -> tuple[float | None, bool]:
+    """トラック全体の歩行速度 [m/s] と、クリップしたかどうか。
 
-    # 半分にすると目標の刻みで下限の区間数を取れない場合、前半・後半それぞれの
-    # 値は細切れの区間から出ることになり信用できない。全体の値で代用する。
-    if half < 2 or _natural_segments(half, params) < minimum:
-        whole = speed_mps(points, H, params)
-        return whole, whole, True
+    シナリオに停止・滞留を含むため、止まっている区間を混ぜた中央値は
+    「その人の歩行速度」にならない。`speed_stop_threshold` 未満の区間を
+    落としてから中央値を取る。全区間が落ちたら None を返し、呼び出し側が
+    同じカメラ・同じ日の中央値で代用する。
 
-    return speed_mps(points[:half], H, params), speed_mps(points[half:], H, params), False
+    最後に妥当範囲でクリップする。ホモグラフィの外挿が効く画面端では
+    3.5 m/s のような歩行では有り得ない値が出るため。
+    """
+    stop_threshold = float(params.get("speed_stop_threshold", 0.3))
+    lo = float(params.get("speed_min_mps", 0.6))
+    hi = float(params.get("speed_max_mps", 2.0))
+
+    moving = [s for s in segment_speeds(points, H, params) if s >= stop_threshold]
+    if not moving:
+        return None, False
+
+    value = statistics.median(moving)
+    clipped = min(max(value, lo), hi)
+    return clipped, clipped != value
+
+
+def harmonic_mean_speed(a: float | None, b: float | None) -> float | None:
+    """2トラックの速度の調和平均。
+
+    到着時刻は距離÷速度で決まるので、平均すべきは速度ではなく「1mあたりの
+    所要時間」。その逆数が調和平均にあたる。片方でも欠ければ None。
+    """
+    if not a or not b or a <= 0 or b <= 0:
+        return None
+    return 2.0 * a * b / (a + b)
 
 
 def summarize_track(
@@ -165,7 +202,7 @@ def summarize_track(
 ) -> TrackSummary:
     entry = match_zones(points, cam_cfg, dir_frames, entering=True)
     exit_ = match_zones(points, cam_cfg, dir_frames, entering=False)
-    entry_speed, exit_speed, fallback = _half_speed(points, H, params)
+    speed, clipped = track_speed(points, H, params)
 
     return TrackSummary(
         date=date,
@@ -180,9 +217,8 @@ def summarize_track(
         exit_dir_deg=exit_.direction,
         entry_zones=list(entry.zones),
         exit_zones=list(exit_.zones),
-        entry_speed_mps=entry_speed,
-        exit_speed_mps=exit_speed,
-        speed_fallback=fallback,
+        speed_mps=speed,
+        speed_clipped=clipped,
     )
 
 
@@ -195,11 +231,26 @@ def summarize_camera(
     params: dict[str, Any],
     dir_frames: int,
 ) -> list[TrackSummary]:
-    return [
+    """1カメラ分を要約する。
+
+    ずっと止まっていて速度を出せなかったトラックには、同じカメラ・同じ日の
+    中央値を当てる。そのカメラを通る人の典型的な速さが、そのトラックにとっても
+    いちばんましな推定値になる。
+    """
+    summaries = [
         summarize_track(date, camera, tid, points, cam_cfg, H, params, dir_frames)
         for tid, points in sorted(tracks.items(), key=lambda kv: int(kv[0]))
         if points
     ]
+
+    known = [s.speed_mps for s in summaries if s.speed_mps is not None]
+    if known:
+        median = statistics.median(known)
+        for s in summaries:
+            if s.speed_mps is None:
+                s.speed_mps = median
+                s.speed_fallback = True
+    return summaries
 
 
 def track_direction_deg(

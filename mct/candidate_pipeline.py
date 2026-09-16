@@ -20,7 +20,7 @@ from mct.candidates import Candidate, candidate_counts, enumerate_candidates
 from mct.config import CameraConfig, load_cameras, load_params, load_transitions
 from mct.geometry import get_homography
 from mct.io_utils import load_tracking_result
-from mct.summarize import TrackSummary, summarize_camera
+from mct.summarize import TrackSummary, harmonic_mean_speed, summarize_camera
 
 __all__ = ["CANDIDATES_FILENAME", "build_candidates", "run"]
 
@@ -43,7 +43,10 @@ def _spatiotemporal(params_path: str | Path) -> tuple[dict[str, Any], int]:
         "fps": 30,
         "speed_target_sec": 1.5,
         "speed_min_segments": 3,
+        "speed_stop_threshold": 0.3,
+        "speed_min_mps": 0.6,
         "speed_max_mps": 2.0,
+        "calib_min_samples": 5,
         "self_loop_dir_tol": 60,
     }
     params.update(raw.get("spatiotemporal") or {})
@@ -143,16 +146,17 @@ def print_counts(date: str, summaries: list[TrackSummary], candidates: list[Cand
 
 
 def print_speed_stats(summaries: list[TrackSummary]) -> None:
-    speeds = [
-        v for s in summaries for v in (s.entry_speed_mps, s.exit_speed_mps) if v is not None
-    ]
-    n_none = sum(
-        1 for s in summaries for v in (s.entry_speed_mps, s.exit_speed_mps) if v is None
-    )
+    speeds = [s.speed_mps for s in summaries if s.speed_mps is not None]
+    n_none = sum(1 for s in summaries if s.speed_mps is None)
     n_fallback = sum(1 for s in summaries if s.speed_fallback)
+    n_clipped = sum(1 for s in summaries if s.speed_clipped)
 
-    print(f"\n速度の統計（トラック {len(summaries)} / 速度値 {len(speeds)} 個）")
-    print(f"  算出できなかった値: {n_none} 個 / 全体から代用したトラック: {n_fallback}")
+    print(f"\n速度の統計（トラック {len(summaries)}）")
+    print(
+        f"  算出できず {n_none} / 停止のみでカメラ中央値を代用 {n_fallback} "
+        f"({100*n_fallback/max(1,len(summaries)):.1f}%) / クリップ {n_clipped} "
+        f"({100*n_clipped/max(1,len(summaries)):.1f}%)"
+    )
     if not speeds:
         return
 
@@ -167,10 +171,6 @@ def print_speed_stats(summaries: list[TrackSummary]) -> None:
         f"  歩行速度として妥当な {lo}〜{hi} m/s に入る割合: "
         f"{100*inside/len(a):.1f}% ({inside}/{len(a)})"
     )
-    for label, mask in (("遅すぎ (<0.5)", a < lo), ("速すぎ (>2.5)", a > hi)):
-        n = int(mask.sum())
-        if n:
-            print(f"    {label}: {n} 個 ({100*n/len(a):.1f}%)")
 
 
 def print_arrival_error(
@@ -190,8 +190,12 @@ def print_arrival_error(
     for c in candidates:
         if c.route is None or (c.tgt, c.src) not in correct_pairs:
             continue
-        tgt = summaries.get(c.tgt)
-        speed = tgt.exit_speed_mps if tgt else None
+        tgt, src = summaries.get(c.tgt), summaries.get(c.src)
+        if tgt is None or src is None:
+            continue
+        # 到着時刻は距離÷速度なので、平均すべきは 1m あたりの所要時間。
+        # その逆数、すなわち調和平均を使う。
+        speed = harmonic_mean_speed(tgt.speed_mps, src.speed_mps)
         if not speed or speed <= 0:
             continue
         predicted = c.route.distance_m / speed * fps

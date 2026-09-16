@@ -35,10 +35,13 @@ filtering:
 # --- フェーズ4以降（未使用。値は暫定） ---
 spatiotemporal:
   fps: 30
-  speed_target_sec: 1.5 # 速度計測の目標刻み（秒）
+  speed_target_sec: 1.5 # 速度計測の目標刻み（秒）。短くすると1区間の誤差が増える
   speed_min_segments: 3 # 最低でもこの数の区間に分割する
-  speed_max_mps: 2.0 # 到達時間の下限計算に使う上限速度
+  speed_stop_threshold: 0.3 # これ未満の区間は停止とみなして中央値から外す
+  speed_min_mps: 0.6 # 算出後にこの範囲へクリップする（ホモグラフィの外挿誤差対策）
+  speed_max_mps: 2.0
   self_loop_dir_tol: 60 # 自己ループで進行方向の反転を認める許容差（度）
+  calib_min_samples: 5 # 距離校正でこの数未満のゾーン対は手動値を維持する
   # dir_frames は filtering 側の値を使う（遷移領域の判定と食い違わせないため）
 
 appearance:

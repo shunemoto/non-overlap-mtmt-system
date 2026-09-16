@@ -1,0 +1,156 @@
+# 正解遷移から距離を校正した transitions。
+# scripts ではなく `python -m mct.cli calibrate-distance` が生成する。
+# distance_m 以外は configs/transitions.yaml と同じ。
+# adopted=False のゾーン対（サンプル数が足りない）は手動値のまま。
+
+transitions:
+  - from: {cam: camA, zone: a_to_b}
+    to: {cam: camA, zone: a_to_b}
+    distance_m: 30.0
+    search_range_sec: [300, null]
+    c_dwell: 0.1
+  - from: {cam: camA, zone: a_to_b}
+    to: {cam: camB, zone: b_to_a}
+    distance_m: 41.0
+    search_range_sec: [27, 37]
+    c_dwell: 0.2
+  - from: {cam: camA, zone: a_to_h}
+    to: {cam: camH, zone: h_to_a}
+    distance_m: 15.0
+    search_range_sec: [7, 16]
+    c_dwell: 0.1
+  - from: {cam: camB, zone: b_to_a}
+    to: {cam: camA, zone: a_to_b}
+    distance_m: 35.8  # 校正済み（5 件、元 41）
+    search_range_sec: [27, 37]
+    c_dwell: 0.2
+  - from: {cam: camB, zone: b_to_a}
+    to: {cam: camB, zone: b_to_a}
+    distance_m: 20.0
+    search_range_sec: [200, null]
+    c_dwell: 0.2
+  - from: {cam: camB, zone: b_to_cf}
+    to: {cam: camC, zone: c_to_bdef}
+    distance_m: 20.0
+    search_range_sec: [13, 28]
+    c_dwell: 0.15
+  - from: {cam: camB, zone: b_to_d}
+    to: {cam: camD, zone: d_to_bcf}
+    distance_m: 9.0  # 校正済み（10 件、元 9）
+    search_range_sec: [6, 16]
+    c_dwell: 0.1
+  - from: {cam: camB, zone: b_to_cf}
+    to: {cam: camF, zone: f_to_bcd}
+    distance_m: 15.9  # 校正済み（6 件、元 18）
+    search_range_sec: [11, 26]
+    c_dwell: 0.15
+  - from: {cam: camC, zone: c_to_bdef}
+    to: {cam: camB, zone: b_to_cf}
+    distance_m: 22.5  # 校正済み（5 件、元 20）
+    search_range_sec: [13, 28]
+    c_dwell: 0.15
+  - from: {cam: camC, zone: c_to_bdef}
+    to: {cam: camD, zone: d_to_bcf}
+    distance_m: 20.4  # 校正済み（7 件、元 21）
+    search_range_sec: [13, 28]
+    c_dwell: 0.15
+  - from: {cam: camC, zone: c_to_bdef}
+    to: {cam: camD, zone: d_to_c}
+    distance_m: 21.0
+    search_range_sec: [13, 28]
+    c_dwell: 0.1
+  - from: {cam: camC, zone: c_to_bdef}
+    to: {cam: camE, zone: e_to_c}
+    distance_m: 20.0
+    search_range_sec: [15, 25]
+    c_dwell: 0.1
+  - from: {cam: camC, zone: c_to_e}
+    to: {cam: camE, zone: e_to_c}
+    distance_m: 20.0
+    search_range_sec: [15, 25]
+    c_dwell: 0.1
+  - from: {cam: camC, zone: c_to_bdef}
+    to: {cam: camF, zone: f_to_bcd}
+    distance_m: 30.3  # 校正済み（9 件、元 30）
+    search_range_sec: [18, 33]
+    c_dwell: 0.15
+  - from: {cam: camD, zone: d_to_bcf}
+    to: {cam: camB, zone: b_to_d}
+    distance_m: 10.2  # 校正済み（9 件、元 9）
+    search_range_sec: [6, 16]
+    c_dwell: 0.1
+  - from: {cam: camD, zone: d_to_bcf}
+    to: {cam: camC, zone: c_to_bdef}
+    distance_m: 21.0
+    search_range_sec: [13, 28]
+    c_dwell: 0.15
+  - from: {cam: camD, zone: d_to_c}
+    to: {cam: camC, zone: c_to_bdef}
+    distance_m: 22.5  # 校正済み（5 件、元 21）
+    search_range_sec: [13, 28]
+    c_dwell: 0.1
+  - from: {cam: camD, zone: d_to_bcf}
+    to: {cam: camF, zone: f_to_bcd}
+    distance_m: 20.4  # 校正済み（9 件、元 24）
+    search_range_sec: [18, 30]
+    c_dwell: 0.15
+  - from: {cam: camE, zone: e_to_c}
+    to: {cam: camC, zone: c_to_e}
+    distance_m: 25.3  # 校正済み（9 件、元 20）
+    search_range_sec: [15, 25]
+    c_dwell: 0.1
+  - from: {cam: camE, zone: e_to_c}
+    to: {cam: camC, zone: c_to_bdef}
+    distance_m: 20.0
+    search_range_sec: [15, 25]
+    c_dwell: 0.1
+  - from: {cam: camF, zone: f_to_bcd}
+    to: {cam: camB, zone: b_to_cf}
+    distance_m: 18.0
+    search_range_sec: [11, 26]
+    c_dwell: 0.15
+  - from: {cam: camF, zone: f_to_bcd}
+    to: {cam: camC, zone: c_to_bdef}
+    distance_m: 26.0  # 校正済み（6 件、元 30）
+    search_range_sec: [18, 33]
+    c_dwell: 0.15
+  - from: {cam: camF, zone: f_to_bcd}
+    to: {cam: camD, zone: d_to_bcf}
+    distance_m: 24.0
+    search_range_sec: [18, 30]
+    c_dwell: 0.15
+  - from: {cam: camF, zone: f_to_g}
+    to: {cam: camF, zone: f_to_g}
+    distance_m: 10.0
+    search_range_sec: [110, null]
+    c_dwell: 0.25
+  - from: {cam: camF, zone: f_to_g}
+    to: {cam: camG, zone: g_to_f}
+    distance_m: 14.6  # 校正済み（23 件、元 10）
+    search_range_sec: [7, 17]
+    c_dwell: 0.15
+  - from: {cam: camG, zone: g_to_f}
+    to: {cam: camF, zone: f_to_g}
+    distance_m: 14.1  # 校正済み（8 件、元 10）
+    search_range_sec: [7, 17]
+    c_dwell: 0.15
+  - from: {cam: camG, zone: g_to_g}
+    to: {cam: camG, zone: g_to_g}
+    distance_m: 10.0
+    search_range_sec: [100, null]
+    c_dwell: 0.3
+  - from: {cam: camG, zone: g_to_h}
+    to: {cam: camH, zone: h_to_g}
+    distance_m: 19.0
+    search_range_sec: [15, 35]
+    c_dwell: 0.1
+  - from: {cam: camH, zone: h_to_a}
+    to: {cam: camA, zone: a_to_h}
+    distance_m: 15.0
+    search_range_sec: [7, 16]
+    c_dwell: 0.1
+  - from: {cam: camH, zone: h_to_g}
+    to: {cam: camG, zone: g_to_h}
+    distance_m: 19.0
+    search_range_sec: [15, 35]
+    c_dwell: 0.1

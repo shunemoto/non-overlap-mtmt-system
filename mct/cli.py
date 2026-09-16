@@ -316,6 +316,78 @@ def _report_recall(args: argparse.Namespace, per_date: list) -> None:
     print_missed_breakdown(merged_buckets, total_gt)
 
 
+def _correct_pairs_and_summaries(args, date, summaries):
+    """GT で正解とされるトラック対と、(camera, track) 索引を返す。"""
+    import warnings
+
+    from mct.config import load_params
+    from mct.evaluation import match_tracks
+    from mct.gt import gt_transitions, load_ground_truth
+    from mct.io_utils import load_tracking_result
+
+    ev_params = load_params(args.params).get("evaluation") or {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gt = load_ground_truth(args.gt_root, date)
+
+    to_pred = {}
+    for camera in ALL_CAMERAS:
+        source = Path(args.out) / date / camera / "tracks_filtered.json"
+        if not source.is_file():
+            continue
+        m = match_tracks(load_tracking_result(source), gt, camera, ev_params)
+        for pred_track, gt_track in m.pairs.items():
+            to_pred[(camera, gt_track)] = (camera, int(pred_track))
+
+    correct = set()
+    for t in gt_transitions(gt):
+        a = to_pred.get((t.from_cam, t.from_track))
+        b = to_pred.get((t.to_cam, t.to_track))
+        if a and b:
+            correct.add((a, b))
+    return correct, {s.key: s for s in summaries}
+
+
+def cmd_calibrate_distance(args: argparse.Namespace) -> int:
+    import warnings
+
+    from mct.calibrate import (
+        YAML_FILENAME, calibrate, collect_samples, print_report, write_csv, write_yaml,
+    )
+    from mct.candidate_pipeline import _spatiotemporal, build_candidates
+    from mct.config import load_cameras, load_transitions
+
+    cameras = load_cameras(args.config)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        routes = load_transitions(args.transitions, cameras)
+    st_params, _ = _spatiotemporal(args.params)
+    fps = float(st_params["fps"])
+    min_samples = int(st_params.get("calib_min_samples", 5))
+
+    dates = [d for d in ALL_DATES if d != args.holdout_date]
+    if args.holdout_date:
+        print(f"校正から除外する日付: {args.holdout_date}（leave-one-day-out）")
+
+    per_date = []
+    for date in dates:
+        summaries, candidates, _ = build_candidates(
+            date, args.out, args.config, args.transitions, args.params
+        )
+        correct, by_key = _correct_pairs_and_summaries(args, date, summaries)
+        per_date.append(collect_samples(candidates, by_key, correct, fps))
+        print(f"  {date}: 正解の対 {len(correct)} からサンプルを収集")
+
+    calibrations = calibrate(per_date, routes, min_samples)
+    print_report(calibrations, min_samples)
+
+    csv_path = write_csv(calibrations, args.out)
+    yaml_path = write_yaml(calibrations, routes, Path(args.config).parent / YAML_FILENAME)
+    print(f"\nwrote {csv_path}")
+    print(f"wrote {yaml_path}")
+    return 0
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     from mct.cache import clear, list_entries
 
@@ -524,6 +596,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--gt-root", default=DEFAULT_GT_ROOT, help=f"GT のルート (default: {DEFAULT_GT_ROOT})"
     )
     p_cand.set_defaults(func=cmd_candidates)
+
+    p_calib = sub.add_parser(
+        "calibrate-distance", help="正解遷移からゾーン対ごとの距離を校正する"
+    )
+    p_calib.add_argument(
+        "--holdout-date",
+        help="この日付を校正から除く（leave-one-day-out で評価するため）",
+    )
+    p_calib.add_argument(
+        "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+    )
+    p_calib.add_argument("--config", default=DEFAULT_CAMERAS)
+    p_calib.add_argument("--transitions", default=DEFAULT_TRANSITIONS)
+    p_calib.add_argument("--params", default=DEFAULT_CONFIG)
+    p_calib.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
+    p_calib.set_defaults(func=cmd_calibrate_distance)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')
