@@ -27,15 +27,16 @@ cameras:
       - id: a_to_b
         region:
           type: rect
-          points: [[460, 420], [650, 780]]
-        exit_dir: [140, 186] # 退出時の進行方向の許容範囲（度）
+          points: [[345, 420], [650, 780]]
+        exit_dir: [140, 235] # 退出時の進行方向の許容範囲（度）
         entry_dir: [336, 54] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camB, room: null }
           - { cam: camA, room: design_room } # 自己ループ
       - id: a_to_h
-        region: { type: rect, points: [[0, 650], [500, 1080]] }
-        # a_to_b の退出上限 186 度と境を接する（実測の 187-194 度を拾う）
+        # a_to_b とは x=345 で領域が分かれるので、角度は重なってよい。
+        # 実測の退出は 189-218 度（うち 189/194 度は camB 行き）。
+        region: { type: rect, points: [[0, 650], [344, 1080]] }
         exit_dir: [187, 260]
         entry_dir: [0, 70]
         to:
@@ -109,8 +110,8 @@ cameras:
         region:
           type: rect
           points: [[0, 280], [360, 860]]
-        exit_dir: [186, 250] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [0, 80] # 出現時の進行方向の許容範囲（度）
+        exit_dir: [145, 250] # 退出時の進行方向の許容範囲（度）
+        entry_dir: [330, 80] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camC, room: null }
           - { cam: camF, room: null }
