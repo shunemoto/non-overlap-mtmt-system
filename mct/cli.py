@@ -46,6 +46,33 @@ def _resolve_out(args: argparse.Namespace) -> None:
         args.out = GT_OUT_ROOT
 
 
+def _matchings(args, gt, date, ev_params):
+    """予測トラックと GT トラックの対応。
+
+    `--use-gt` のときは恒等にする。GT 由来の入力は track_id が GT のもの
+    そのままなので照合の必要が無いうえ、観測区間で点を落としているせいで
+    「GT の全長に対する重なり割合」が `match_min_ratio` を割り、正しい対応まで
+    落ちてしまう。
+    """
+    from mct.evaluation import TrackMatching, match_tracks
+    from mct.io_utils import load_tracking_result
+
+    matchings = {}
+    for camera in ALL_CAMERAS:
+        source = Path(args.out) / date / camera / "tracks_filtered.json"
+        if not source.is_file():
+            continue
+        result = load_tracking_result(source)
+        if getattr(args, "use_gt", False):
+            matchings[camera] = TrackMatching(
+                camera=camera,
+                pairs={tid: int(tid) for tid in result.tracks},
+            )
+        else:
+            matchings[camera] = match_tracks(result, gt, camera, ev_params)
+    return matchings
+
+
 def _load_gt(args, date):
     """params.yaml のフレームオフセットを当てて GT を読む。"""
     from mct.config import load_params
@@ -321,14 +348,7 @@ def _report_recall(args: argparse.Namespace, per_date: list) -> None:
             warnings.simplefilter("ignore")
             gt = _load_gt(args, date)
 
-        matchings = {}
-        for camera in ALL_CAMERAS:
-            source = Path(args.out) / date / camera / "tracks_filtered.json"
-            if source.is_file():
-                matchings[camera] = match_tracks(
-                    load_tracking_result(source), gt, camera, ev_params
-                )
-
+        matchings = _matchings(args, gt, date, ev_params)
         report = candidate_recall([c.as_link() for c in candidates], gt, matchings)
         total_gt += report.n_gt
         total_covered += report.n_covered
@@ -363,30 +383,18 @@ def _correct_pairs_and_summaries(args, date, summaries):
     import warnings
 
     from mct.config import load_params
-    from mct.evaluation import match_tracks
-    from mct.gt import gt_transitions, load_ground_truth
-    from mct.io_utils import load_tracking_result
+    from mct.gt import gt_transitions
 
     ev_params = load_params(args.params).get("evaluation") or {}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gt = _load_gt(args, date)
 
-    to_pred = {}
-    if getattr(args, "use_gt", False):
-        # GT 由来の入力では track_id が GT のものそのままなので、対応付けは恒等。
-        # match_tracks を通しても IoU 1.0 で同じ結果になるが、無駄が多い。
-        for camera in gt.boxes:
-            for gt_track in gt.evaluable(camera):
-                to_pred[(camera, gt_track)] = (camera, gt_track)
-    else:
-        for camera in ALL_CAMERAS:
-            source = Path(args.out) / date / camera / "tracks_filtered.json"
-            if not source.is_file():
-                continue
-            m = match_tracks(load_tracking_result(source), gt, camera, ev_params)
-            for pred_track, gt_track in m.pairs.items():
-                to_pred[(camera, gt_track)] = (camera, int(pred_track))
+    to_pred = {
+        (camera, gt_track): (camera, int(pred_track))
+        for camera, m in _matchings(args, gt, date, ev_params).items()
+        for pred_track, gt_track in m.pairs.items()
+    }
 
     correct = set()
     for t in gt_transitions(gt):
