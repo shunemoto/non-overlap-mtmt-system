@@ -209,7 +209,7 @@ cameras:
           type: rect
           points: [[1400, 500], [1919, 1080]]
         exit_dir: [0, 60] # 退出時の進行方向の許容範囲（度）
-        entry_dir: [180, 240] # 出現時の進行方向の許容範囲（度）
+        entry_dir: [170, 240] # 出現時の進行方向の許容範囲（度）
         to:
           - { cam: camE, room: null }
     homography:

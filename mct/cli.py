@@ -414,6 +414,87 @@ def cmd_calibrate_distance(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sigma_samples(args, dates):
+    """各日付の正解遷移から、到着時刻の誤差を集める。"""
+    from mct.candidate_pipeline import _spatiotemporal
+    from mct.spatiotemporal import collect_errors
+    from mct.st_pipeline import load_candidates
+
+    params, _ = _spatiotemporal(args.params)
+    per_date = []
+    for date in dates:
+        summaries, candidates, _ = load_candidates(date, args.out)
+        correct, _ = _correct_pairs_and_summaries(args, date, summaries)
+        per_date.append(collect_errors(candidates, summaries, correct, params))
+        print(f"  {date}: 正解の対 {len(correct)} から誤差を収集")
+    return per_date, params
+
+
+def cmd_calibrate_sigma(args: argparse.Namespace) -> int:
+    from mct.spatiotemporal import estimate_sigma
+    from mct.st_pipeline import print_sigma_report, write_sigma_csv
+
+    dates = [d for d in ALL_DATES if d != args.holdout_date]
+    if args.holdout_date:
+        print(f"校正から除外する日付: {args.holdout_date}（leave-one-day-out）")
+
+    per_date, params = _sigma_samples(args, dates)
+    _, estimates, pooled = estimate_sigma(per_date, params)
+
+    print_sigma_report(estimates, pooled, int(params.get("sigma_min_samples", 5)))
+    print(f"\nwrote {write_sigma_csv(estimates, pooled, args.out)}")
+    return 0
+
+
+def cmd_st_scores(args: argparse.Namespace) -> int:
+    from mct.candidate_pipeline import _spatiotemporal
+    from mct.spatiotemporal import KIND_IN_RANGE, estimate_sigma, score_candidates
+    from mct.st_pipeline import load_candidates, write_scores
+    from mct.st_report import (
+        Labelled, plot_separation, print_error_by_zone, print_kind_breakdown,
+        print_ranks, print_separation,
+    )
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    # σ は全日付から推定する（--holdout-date で除ける）
+    calib_dates = [d for d in ALL_DATES if d != args.holdout_date]
+    per_date, params = _sigma_samples(args, calib_dates)
+    sigma, _, pooled = estimate_sigma(per_date, params)
+    print(f"  共通 σ = {pooled:.0f} フレーム / 個別推定 {len(sigma.per_zone)} ゾーン対\n")
+
+    labelled: list[Labelled] = []
+    n_imputed = 0
+    for date in dates:
+        summaries, candidates, _ = load_candidates(date, args.out)
+        scores = score_candidates(candidates, summaries, sigma, params)
+        dest = write_scores(date, args.out, scores, sigma, params)
+
+        correct, _ = _correct_pairs_and_summaries(args, date, summaries)
+        by_kind = {k: 0 for k in ("in_range", "out_of_range", "self_loop")}
+        for candidate, score in zip(candidates, scores):
+            by_kind[score.kind] += 1
+            n_imputed += int(score.speed_imputed)
+            zone = None
+            if candidate.route is not None:
+                r = candidate.route
+                zone = (r.from_cam, r.from_zone, r.to_cam, r.to_zone)
+            labelled.append(
+                Labelled(score, (score.tgt, score.src) in correct, date, zone)
+            )
+        print(f"{date}: 候補 {len(scores)} 件 -> {dest}")
+        print(f"  {by_kind}")
+
+    print(f"\n速度を中央値で代用した候補: {n_imputed} 件")
+    print_separation(labelled)
+    print_kind_breakdown(labelled)
+    print_error_by_zone(labelled, float(params.get("fps", 30)))
+    print_ranks(labelled)
+
+    png = plot_separation(labelled, Path(args.out) / "viz" / "st_likelihood_separation.png")
+    print(f"\nwrote {png}")
+    return 0
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     from mct.cache import clear, list_entries
 
@@ -639,6 +720,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_calib.add_argument("--params", default=DEFAULT_CONFIG)
     p_calib.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
     p_calib.set_defaults(func=cmd_calibrate_distance)
+
+    def _add_st_common(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+            help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+        )
+        parser.add_argument("--config", default=DEFAULT_CAMERAS)
+        parser.add_argument("--transitions", default=DEFAULT_TRANSITIONS)
+        parser.add_argument("--params", default=DEFAULT_CONFIG)
+        parser.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
+        parser.add_argument(
+            "--holdout-date", help="σ の推定からこの日付を除く（leave-one-day-out）"
+        )
+
+    p_sigma = sub.add_parser(
+        "calibrate-sigma", help="正解遷移から到着時刻のばらつき σ を推定する"
+    )
+    _add_st_common(p_sigma)
+    p_sigma.add_argument("--all-dates", action="store_true", help="（既定で全4日を使う）")
+    p_sigma.set_defaults(func=cmd_calibrate_sigma)
+
+    p_st = sub.add_parser("st-scores", help="候補に時空間尤度を付けて書き出す")
+    p_st.add_argument("--date", help='撮影日 (例: "0720")')
+    p_st.add_argument("--all-dates", action="store_true", help="全4日を処理する")
+    _add_st_common(p_st)
+    p_st.set_defaults(func=cmd_st_scores)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')

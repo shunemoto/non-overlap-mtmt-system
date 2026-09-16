@@ -42,6 +42,8 @@ spatiotemporal:
   speed_max_mps: 2.0
   self_loop_dir_tol: 60 # 自己ループで進行方向の反転を認める許容差（度）
   calib_min_samples: 5 # 距離校正でこの数未満のゾーン対は手動値を維持する
+  sigma_min_samples: 5 # σ もこの数未満のゾーン対は共通値を使う
+  sigma_default_frames: 60 # 共通σの初期値（calibrate-sigma で上書きされる）
   # dir_frames は filtering 側の値を使う（遷移領域の判定と食い違わせないため）
 
 appearance:
