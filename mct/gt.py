@@ -15,6 +15,7 @@ import csv
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 __all__ = [
     "GTBox",
@@ -22,6 +23,7 @@ __all__ = [
     "GTTransition",
     "ALL_CAMERAS",
     "load_ground_truth",
+    "gt_frame_offsets",
     "gt_transitions",
 ]
 
@@ -86,8 +88,22 @@ class GTTransition:
         return self.from_cam == self.to_cam
 
 
-def _read_gt_file(path: Path) -> dict[int, list[GTBox]]:
-    """MOT 形式の gt.txt を track_id ごとにまとめる。"""
+def gt_frame_offsets(params: dict[str, Any], date: str) -> dict[str, int]:
+    """その日付のカメラ別フレームオフセット。
+
+    `params.yaml` の `gt_frame_offset` から引く。アノテーション時の基準が
+    追跡結果とずれているカメラ・日付だけを書く。
+    """
+    raw = (params.get("gt_frame_offset") or {}).get(date) or {}
+    return {_camera_name(str(cam)): int(value) for cam, value in raw.items()}
+
+
+def _read_gt_file(path: Path, offset: int = 0) -> dict[int, list[GTBox]]:
+    """MOT 形式の gt.txt を track_id ごとにまとめる。
+
+    `offset` は「GT が追跡結果より何フレーム進んでいるか」。引いて
+    追跡結果と同じ基準にそろえる。ファイルの中身は書き換えない。
+    """
     tracks: dict[int, list[GTBox]] = collections.defaultdict(list)
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -97,7 +113,7 @@ def _read_gt_file(path: Path) -> dict[int, list[GTBox]]:
             cells = line.split(",")
             tracks[int(cells[1])].append(
                 GTBox(
-                    frame_idx=int(cells[0]),
+                    frame_idx=int(cells[0]) - offset,
                     bbox=(float(cells[2]), float(cells[3]), float(cells[4]), float(cells[5])),
                     not_ignored=int(cells[6]) != 0,
                     visibility=float(cells[8]) if len(cells) > 8 else 1.0,
@@ -120,6 +136,7 @@ def load_ground_truth(
     date: str,
     cameras: tuple[str, ...] = ALL_CAMERAS,
     *,
+    frame_offsets: dict[str, int] | None = None,
     ignore_without_global_id: bool = True,
 ) -> GroundTruth:
     """1日分の GT を読む。
@@ -130,6 +147,10 @@ def load_ground_truth(
     - Global ID を持たないトラック。全32本で56件あり、95%が30フレーム未満・
       長さの中央値が2フレームというアノテーションの断片で、Global ID が
       無い以上そもそも正誤を判定できない
+
+    `frame_offsets` はカメラ名からフレームのずれへの対応。アノテーション時の
+    基準が追跡結果とずれているカメラ・日付を補正するためのもので、
+    `gt.txt` の中身は書き換えない。
     """
     root = Path(gt_root)
     gid_path = root / GLOBAL_ID_FILENAME
@@ -139,6 +160,7 @@ def load_ground_truth(
         )
 
     gt = GroundTruth(date=date, global_ids=_read_global_ids(gid_path, date))
+    offsets = frame_offsets or {}
 
     for camera in cameras:
         path = root / date / camera / GT_FILENAME
@@ -146,7 +168,7 @@ def load_ground_truth(
             warnings.warn(f"{path} がありません（{date}/{camera} は評価対象0件）", stacklevel=2)
             gt.boxes[camera] = {}
             continue
-        gt.boxes[camera] = _read_gt_file(path)
+        gt.boxes[camera] = _read_gt_file(path, offsets.get(camera, 0))
 
     for (camera, track_id), _ in list(gt.global_ids.items()):
         if track_id not in gt.boxes.get(camera, {}):

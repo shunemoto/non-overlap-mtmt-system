@@ -208,3 +208,72 @@ def test_real_gt_has_no_name_column() -> None:
 
     assert header.split(",") == ["sequence_id", "global_id", "camera_id", "local_track_id"]
     assert "name" not in header and "anonymize" not in header
+
+
+# --- フレームオフセットの補正 --------------------------------------------
+
+
+def test_frame_offset_shifts_gt_to_tracking_base(tmp_path: Path) -> None:
+    """GT が追跡結果より進んでいる分を引いて基準をそろえる。"""
+    _write_gt(tmp_path, "camA", [
+        "110,1,100,200,50,120,1,1,1.0",
+        "111,1,100,200,50,120,1,1,1.0",
+    ])
+    _write_global_ids(tmp_path, ["720,P001,A,1"])
+
+    gt = load_ground_truth(
+        tmp_path, "0720", cameras=("camA",), frame_offsets={"camA": 10}
+    )
+
+    assert [b.frame_idx for b in gt.boxes["camA"][1]] == [100, 101]
+
+
+def test_frame_offset_applies_per_camera(tmp_path: Path) -> None:
+    _write_gt(tmp_path, "camA", ["110,1,100,200,50,120,1,1,1.0"])
+    _write_gt(tmp_path, "camB", ["110,1,100,200,50,120,1,1,1.0"])
+    _write_global_ids(tmp_path, ["720,P001,A,1", "720,P002,B,1"])
+
+    gt = load_ground_truth(
+        tmp_path, "0720", cameras=("camA", "camB"), frame_offsets={"camC": 10}
+    )
+
+    # 指定の無いカメラは素通し
+    assert gt.boxes["camA"][1][0].frame_idx == 110
+    assert gt.boxes["camB"][1][0].frame_idx == 110
+
+
+def test_no_offset_by_default(tmp_path: Path) -> None:
+    _write_gt(tmp_path, "camA", ["110,1,100,200,50,120,1,1,1.0"])
+    _write_global_ids(tmp_path, ["720,P001,A,1"])
+
+    gt = load_ground_truth(tmp_path, "0720", cameras=("camA",))
+
+    assert gt.boxes["camA"][1][0].frame_idx == 110
+
+
+def test_gt_frame_offsets_reads_params() -> None:
+    from mct.gt import gt_frame_offsets
+
+    params = {"gt_frame_offset": {"0730": {"camC": 10}}}
+
+    assert gt_frame_offsets(params, "0730") == {"camC": 10}
+    assert gt_frame_offsets(params, "0720") == {}
+    assert gt_frame_offsets({}, "0730") == {}
+
+
+def test_gt_frame_offsets_normalises_camera_names() -> None:
+    from mct.gt import gt_frame_offsets
+
+    assert gt_frame_offsets({"gt_frame_offset": {"0730": {"C": 10}}}, "0730") == {"camC": 10}
+
+
+@has_gt
+def test_repository_params_correct_0730_camc() -> None:
+    """0730/camC のずれが params.yaml に記録されていること。"""
+    from mct.config import load_params
+    from mct.gt import gt_frame_offsets
+
+    params = load_params(REPO_ROOT / "configs" / "params.yaml")
+
+    assert gt_frame_offsets(params, "0730") == {"camC": 10}
+    assert gt_frame_offsets(params, "0720") == {}

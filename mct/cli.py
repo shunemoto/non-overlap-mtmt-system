@@ -14,7 +14,9 @@ ALL_CAMERAS = ("camA", "camB", "camC", "camD", "camE", "camF", "camG", "camH")
 ALL_DATES = ("0720", "0727", "0730", "0803")
 DEFAULT_VIDEO_ROOT = "data/videos"
 DEFAULT_GT_ROOT = "data/gt"
-DEFAULT_TRANSITIONS = "configs/transitions.yaml"
+MANUAL_TRANSITIONS = "configs/transitions.yaml"
+# 校正済みの実効距離を既定にする（無ければ手動測定値に戻る）
+DEFAULT_TRANSITIONS = "configs/transitions_calibrated.yaml"
 
 
 def _video_path(args: argparse.Namespace, camera: str | None = None) -> Path:
@@ -31,6 +33,30 @@ def _cameras(args: argparse.Namespace) -> list[str]:
     if not getattr(args, "camera", None):
         raise SystemExit("--camera か --all-cameras のどちらかを指定してください")
     return [args.camera]
+
+
+def _load_gt(args, date):
+    """params.yaml のフレームオフセットを当てて GT を読む。"""
+    from mct.config import load_params
+    from mct.gt import gt_frame_offsets, load_ground_truth
+
+    params = load_params(getattr(args, "params", DEFAULT_CONFIG))
+    return load_ground_truth(
+        args.gt_root, date, frame_offsets=gt_frame_offsets(params, date)
+    )
+
+
+def _transitions_path(args) -> str:
+    """遷移定義のパス。校正済みがあればそちらを使う。
+
+    カメラ間距離は正解遷移から逆算した実効距離の方が到着時刻をよく当てる。
+    A->B と B->A で値が違うのは、カメラごとに速度計測の精度が違うことを
+    織り込んだ結果なので、そのまま使ってよい。
+    """
+    chosen = getattr(args, "transitions", None) or DEFAULT_TRANSITIONS
+    if chosen == DEFAULT_TRANSITIONS and not Path(chosen).is_file():
+        return MANUAL_TRANSITIONS
+    return chosen
 
 
 def cmd_track(args: argparse.Namespace) -> int:
@@ -170,7 +196,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     results = []
 
     for date in dates:
-        gt = load_ground_truth(args.gt_root, date)
+        gt = _load_gt(args, date)
 
         if args.use_gt_tracks:
             assignments = _gt_global_ids_as_predictions(gt)
@@ -212,7 +238,7 @@ def cmd_eval_candidates(args: argparse.Namespace) -> int:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         candidates = data.get("links", data) if isinstance(data, dict) else data
-        print_candidate_recall(date, candidate_recall(candidates, load_ground_truth(args.gt_root, date)))
+        print_candidate_recall(date, candidate_recall(candidates, _load_gt(args, date)))
     return 0
 
 
@@ -231,7 +257,7 @@ def cmd_candidates(args: argparse.Namespace) -> int:
 
     for date in dates:
         summaries, candidates, meta = build_candidates(
-            date, args.out, args.config, args.transitions, args.params,
+            date, args.out, args.config, _transitions_path(args), args.params,
             no_topology=args.no_topology,
         )
         dest = write_candidates(date, args.out, summaries, candidates, meta)
@@ -266,7 +292,7 @@ def _report_recall(args: argparse.Namespace, per_date: list) -> None:
     cameras = load_cameras(args.config)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        routes = load_transitions(args.transitions, cameras)
+        routes = load_transitions(_transitions_path(args), cameras)
     ev_params = load_params(args.params).get("evaluation") or {}
     st_params, _ = _spatiotemporal(args.params)
     fps = float(st_params["fps"])
@@ -277,7 +303,7 @@ def _report_recall(args: argparse.Namespace, per_date: list) -> None:
     for date, summaries, candidates in per_date:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            gt = load_ground_truth(args.gt_root, date)
+            gt = _load_gt(args, date)
 
         matchings = {}
         for camera in ALL_CAMERAS:
@@ -328,7 +354,7 @@ def _correct_pairs_and_summaries(args, date, summaries):
     ev_params = load_params(args.params).get("evaluation") or {}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        gt = load_ground_truth(args.gt_root, date)
+        gt = _load_gt(args, date)
 
     to_pred = {}
     for camera in ALL_CAMERAS:
@@ -360,7 +386,7 @@ def cmd_calibrate_distance(args: argparse.Namespace) -> int:
     cameras = load_cameras(args.config)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        routes = load_transitions(args.transitions, cameras)
+        routes = load_transitions(_transitions_path(args), cameras)
     st_params, _ = _spatiotemporal(args.params)
     fps = float(st_params["fps"])
     min_samples = int(st_params.get("calib_min_samples", 5))
@@ -372,7 +398,7 @@ def cmd_calibrate_distance(args: argparse.Namespace) -> int:
     per_date = []
     for date in dates:
         summaries, candidates, _ = build_candidates(
-            date, args.out, args.config, args.transitions, args.params
+            date, args.out, args.config, _transitions_path(args), args.params
         )
         correct, by_key = _correct_pairs_and_summaries(args, date, summaries)
         per_date.append(collect_samples(candidates, by_key, correct, fps))
