@@ -189,14 +189,24 @@ def test_patch_window_rejects_windows_larger_than_the_crop() -> None:
 # --- 関節点 ---------------------------------------------------------------
 
 
-def test_joint_points_are_five_with_a_derived_neck() -> None:
+def test_joint_points_derive_neck_and_torso() -> None:
     kps = _keypoints(i5=(100, 200, 0.9), i6=(140, 200, 0.9),
                      i11=(100, 400, 0.9), i12=(140, 400, 0.9))
 
     points = joint_points(kps)
 
-    assert len(points) == N_JOINTS == 5
+    assert len(points) == N_JOINTS == 6
     assert points[4] == pytest.approx((120.0, 200.0))     # 首元 = 肩の中点
+    assert points[5] == pytest.approx((120.0, 300.0))     # 胴体中心
+
+
+def test_derived_points_need_every_source_joint() -> None:
+    kps = _keypoints(i5=(100, 200, 0.9), i6=(140, 200, 0.9), i11=(100, 400, 0.9))
+
+    points = joint_points(kps)
+
+    assert points[4] is not None          # 首元は肩2点だけで作れる
+    assert points[5] is None              # 胴体中心は腰が片方欠けると作れない
 
 
 def test_neck_needs_both_shoulders() -> None:
@@ -271,6 +281,7 @@ def test_undetected_joints_have_no_descriptor() -> None:
 
     assert descriptors[0] is not None and descriptors[1] is not None
     assert descriptors[2] is None and descriptors[3] is None
+    assert descriptors[5] is None         # 胴体中心も腰が要る
 
 
 def test_sift_descriptors_are_l2_normalised() -> None:

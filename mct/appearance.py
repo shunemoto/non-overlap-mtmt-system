@@ -52,9 +52,11 @@ DESCRIPTOR_FILENAME = "appearance.json"
 L_SHOULDER, R_SHOULDER = 5, 6
 L_HIP, R_HIP = 11, 12
 
-# 胴体中心（肩と腰の中点）は単独 AUC が 0.58〜0.60 とほぼ偶然で、肩と腰の
-# パッチに大きく重なるため独自の情報を持たない。5点の平均を薄めるだけなので外した。
-JOINT_NAMES = ("L肩", "R肩", "L腰", "R腰", "首元")
+# 胴体中心（肩と腰の中点）は単独 AUC が 0.58〜0.60 と他の点（0.63〜0.76）より
+# 低いが、外すと全指標がわずかに下がる（in_range で -0.003〜-0.007）。0.58 は
+# 偶然の 0.5 を上回っているので、平均に加えれば分散が減る。単独の弁別力と
+# 平均への寄与は別物なので、単独 AUC だけで除外を決めない。
+JOINT_NAMES = ("L肩", "R肩", "L腰", "R腰", "首元", "胴体中心")
 N_JOINTS = len(JOINT_NAMES)
 
 # 肩から bbox 下辺までのどこで上下を分けるか（腰が取れなかったときの代用）
@@ -198,10 +200,10 @@ def _histogram(
 
 
 def joint_points(keypoints: list[list[float]] | None) -> list[tuple[float, float] | None]:
-    """記述する5点（元画像座標系）。取れない点は None。
+    """記述する6点（元画像座標系）。取れない点は None。
 
-    肩・腰の4点に加えて、首元（肩の中点）を足す。首元は胸元の柄や襟の形が
-    出るうえ、肩の2点とはパッチが重なりにくい位置にある。
+    肩・腰の4点に加えて、首元（肩の中点）と胴体中心（肩と腰の中点）を足す。
+    服の柄は胴体の真ん中に出ることが多く、関節そのものより情報が乗る。
     """
     def get(i: int) -> tuple[float, float] | None:
         if keypoints is None or i >= len(keypoints) or keypoints[i][2] <= 0:
@@ -220,7 +222,7 @@ def joint_points(keypoints: list[list[float]] | None) -> list[tuple[float, float
             float(np.mean([p[1] for p in usable])),
         )
 
-    return [ls, rs, lh, rh, mid(ls, rs)]
+    return [ls, rs, lh, rh, mid(ls, rs), mid(ls, rs, lh, rh)]
 
 
 def patch_window(
@@ -250,7 +252,7 @@ def sift_features(
     bbox: list[float],
     params: dict[str, Any],
 ) -> list[np.ndarray | None]:
-    """5点分の SIFT 記述子（L2 正規化済み）。取れない点は None。
+    """6点分の SIFT 記述子（L2 正規化済み）。取れない点は None。
 
     骨格点は元画像座標系なので crop の原点を引いて crop 座標系に直す。
     主方向は推定せず `angle=0` に固定する（`compute` を使い
