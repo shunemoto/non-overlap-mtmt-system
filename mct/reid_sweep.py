@@ -16,7 +16,7 @@ import collections
 import itertools
 import statistics
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,17 +26,20 @@ from mct.evaluation import evaluate
 from mct.fusion import METHODS, app_value, fuse
 from mct.predictions import Link
 from mct.reid_pipeline import _load_scores
-from mct.spatiotemporal import KIND_SELF_LOOP
+from mct.spatiotemporal import KIND_IN_RANGE, KIND_OUT_OF_RANGE, KIND_SELF_LOOP
 from mct.st_pipeline import SCORES_FILENAME as ST_SCORES_FILENAME, load_candidates
 from mct.appearance_sim import SCORES_FILENAME as APP_SCORES_FILENAME
 
 __all__ = ["ALPHAS", "ALPHA_SELFS", "NO_MATCH_SCORES", "DayInputs", "run_sweep", "print_report"]
 
-ALPHAS = (0.1, 0.2, 0.3, 0.5, 0.7)
-ALPHA_SELFS = (0.0, 0.1, 0.3, 0.5)
+# 仕様の5水準に 0.0 / 0.05 を足す。最初の掃引で下端の 0.1 が最大になり、
+# IDF1 が α に対して単調減少していたため、外側まで見ないと最大値を言えない。
+# α=0 は「時空間を使わない」= 手法②と同じ設定にあたる。
+ALPHAS = (0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7)
+ALPHA_SELFS = (0.0, 0.1, 0.3, 0.5, 0.7)
 # 仕様の5水準に 0.50 / 0.60 / 0.70 を足す。誤ペアの融合スコアが中央 0.30・
 # p90 0.44 なので、0.40 までだと最適値が範囲の端に出てしまう。
-NO_MATCH_SCORES = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70)
+NO_MATCH_SCORES = (0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70)
 
 METHOD = METHODS[6]
 
@@ -52,11 +55,13 @@ class DayInputs:
     app: dict
     gt: Any
     matchings: dict
+    correct: set = field(default_factory=set)
+    kinds: dict = field(default_factory=dict)
 
 
 def _load_day(args, date: str) -> DayInputs:
     from mct.config import load_params
-    from mct.cli import _load_gt, _matchings
+    from mct.cli import _correct_pairs_and_summaries, _load_gt, _matchings
 
     ev_params = load_params(args.params).get("evaluation") or {}
     summaries, candidates, _ = load_candidates(date, args.out)
@@ -67,6 +72,8 @@ def _load_day(args, date: str) -> DayInputs:
         gt = _load_gt(args, date)
 
     return DayInputs(
+        correct=_correct_pairs_and_summaries(args, date, summaries)[0],
+        kinds=_load_scores(root / date / ST_SCORES_FILENAME, "kind"),
         date=date,
         tracks=sorted(s.key for s in summaries),
         candidates=candidates,
@@ -80,8 +87,8 @@ def _load_day(args, date: str) -> DayInputs:
     )
 
 
-def _idf1(day: DayInputs, params: dict[str, Any]) -> float:
-    """その設定での IDF1。融合と割当だけをやり直す。"""
+def _run(day: DayInputs, params: dict[str, Any]) -> tuple[float, dict[str, tuple[int, int]]]:
+    """(IDF1, 種類ごとの (統合できた数, 正解数))。融合と割当だけをやり直す。"""
     scored = {}
     for candidate in day.candidates:
         pair = (candidate.tgt, candidate.src)
@@ -95,7 +102,20 @@ def _idf1(day: DayInputs, params: dict[str, Any]) -> float:
     chosen = solve(day.tracks, scored, float(params["no_match_score"]))
     links = [Link(t[0], str(t[1]), s[0], str(s[1])) for t, s in chosen]
     assignments = assign_global_ids(links, day.tracks)
-    return evaluate(assignments, day.gt, day.matchings).idf1
+
+    taken = set(chosen)
+    counts: dict[str, tuple[int, int]] = {}
+    for pair in day.correct:
+        kind = day.kinds.get(pair)
+        if kind is None:
+            continue
+        ok, total = counts.get(kind, (0, 0))
+        counts[kind] = (ok + int(pair in taken), total + 1)
+    return evaluate(assignments, day.gt, day.matchings).idf1, counts
+
+
+def _idf1(day: DayInputs, params: dict[str, Any]) -> float:
+    return _run(day, params)[0]
 
 
 def _grid() -> list[dict[str, float]]:
@@ -114,13 +134,22 @@ def run_sweep(args, dates: list[str], report: Callable) -> None:
 
     # 設定 -> 日付 -> IDF1
     table: dict[tuple[float, float, float], dict[str, float]] = {}
+    kinds: dict[tuple[float, float, float], dict[str, tuple[int, int]]] = {}
     for i, params in enumerate(grid, start=1):
         key = (params["alpha"], params["alpha_self"], params["no_match_score"])
-        table[key] = {date: _idf1(days[date], params) for date in dates}
+        per_date, totals = {}, collections.defaultdict(lambda: [0, 0])
+        for date in dates:
+            idf1, counts = _run(days[date], params)
+            per_date[date] = idf1
+            for kind, (ok, total) in counts.items():
+                totals[kind][0] += ok
+                totals[kind][1] += total
+        table[key] = per_date
+        kinds[key] = {k: tuple(v) for k, v in totals.items()}
         if i % 40 == 0:
             print(f"  {i} / {len(grid)} 通り")
 
-    report(table, dates, args)
+    report(table, dates, args, kinds)
 
 
 def _best(table: dict, dates: list[str]) -> tuple[tuple[float, float, float], float]:
@@ -129,7 +158,7 @@ def _best(table: dict, dates: list[str]) -> tuple[tuple[float, float, float], fl
     return best, scores[best]
 
 
-def print_report(table: dict, dates: list[str], args) -> None:
+def print_report(table: dict, dates: list[str], args, kinds: dict | None = None) -> None:
     best, score = _best(table, dates)
     print("\n" + "=" * 78)
     print("融合パラメータの掃引（手法⑥）")
@@ -151,10 +180,45 @@ def print_report(table: dict, dates: list[str], args) -> None:
         for v, idf1 in rows:
             mark = "  ← 最大" if v == top else ""
             print(f"    {v:<8}{idf1:.4f}{mark}")
-        if rows and top in (candidates[0], candidates[-1]):
+        # 0 は α の自然な下限なので、端に出ても「外側を見るべき」ではない
+        at_edge = rows and top in (candidates[0], candidates[-1]) and top != 0.0
+        if at_edge:
             print(f"    ⚠ 最大値が掃引範囲の端（{top}）に出ています")
 
+    if kinds:
+        _print_top(table, dates, kinds)
     _print_loo(table, dates)
+
+
+def _print_top(table: dict, dates: list[str], kinds: dict, n: int = 8) -> None:
+    """IDF1 の高い設定を、種類ごとの正解率と並べて出す。
+
+    IDF1 だけを見ると、件数の多い in_range を優先して自己ループを丸ごと
+    捨てる設定が「最良」に見えることがある。少数派を切り捨てていないかを
+    同じ表で確かめられるようにする。
+    """
+    scores = {k: statistics.mean(v[d] for d in dates) for k, v in table.items()}
+    order = sorted(scores, key=scores.get, reverse=True)[:n]
+
+    print("\n" + "=" * 78)
+    print(f"IDF1 の高い設定 上位{n}件と、種類ごとの正解率")
+    print("=" * 78)
+    print(f"  {'α':>5}{'α_self':>8}{'未対応':>8}{'IDF1':>9}"
+          f"{'in_range':>12}{'out_of_range':>14}{'self_loop':>12}")
+    print("  " + "-" * 68)
+    for key in order:
+        cells = ""
+        for kind in (KIND_IN_RANGE, KIND_OUT_OF_RANGE, KIND_SELF_LOOP):
+            ok, total = kinds[key].get(kind, (0, 0))
+            width = {KIND_IN_RANGE: 12, KIND_OUT_OF_RANGE: 14, KIND_SELF_LOOP: 12}[kind]
+            cells += f"{f'{ok}/{total} ({100*ok/max(1,total):.0f}%)':>{width}}"
+        print(f"  {key[0]:>5}{key[1]:>8}{key[2]:>8}{scores[key]:>9.4f}{cells}")
+
+    dropped = [k for k in order if kinds[k].get(KIND_SELF_LOOP, (0, 0))[0] == 0]
+    if dropped:
+        print(f"\n  ⚠ 上位のうち {len(dropped)} 件は自己ループを1件も拾えていません。"
+              "\n    IDF1 はわずかに上がりますが、自己ループは本研究の対象なので"
+              "\n    この設定を採るなら意図的な取捨であることを明示する必要があります。")
 
 
 def _print_loo(table: dict, dates: list[str]) -> None:
