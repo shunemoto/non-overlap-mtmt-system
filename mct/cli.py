@@ -64,9 +64,13 @@ def _matchings(args, gt, date, ev_params):
             continue
         result = load_tracking_result(source)
         if getattr(args, "use_gt", False):
+            # 同じ箱を指しているので IoU も重なり割合も 1.0。評価側が
+            # `mean_iou` を引くので、空にせず埋めておく。
             matchings[camera] = TrackMatching(
                 camera=camera,
                 pairs={tid: int(tid) for tid in result.tracks},
+                mean_iou={tid: 1.0 for tid in result.tracks},
+                overlap_ratio={tid: 1.0 for tid in result.tracks},
             )
         else:
             matchings[camera] = match_tracks(result, gt, camera, ev_params)
@@ -248,16 +252,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
             if not path:
                 raise SystemExit("--pred か --pred-pattern、または --use-gt-tracks を指定してください")
             assignments = load_predictions(path).assignments
-
-            matchings = {}
-            for camera in ALL_CAMERAS:
-                source = Path(args.out) / date / camera / args.pred_tracks
-                if not source.is_file():
-                    continue
-                matchings[camera] = match_tracks(
-                    load_tracking_result(source), gt, camera, params
-                )
-            result = evaluate(assignments, gt, matchings)
+            # --use-gt では track_id が GT のものそのままなので恒等にする
+            result = evaluate(assignments, gt, _matchings(args, gt, date, params))
 
         print_eval_result(result)
         results.append(result)
@@ -852,6 +848,111 @@ def _add_appearance_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _fusion_params(params_path, **overrides) -> dict:
+    """`fusion:` 節。既定値 → YAML → 明示的な上書き。"""
+    from mct.config import load_params
+
+    params = {"alpha": 0.5, "alpha_self": 0.1, "no_match_score": 0.10}
+    params.update(load_params(params_path).get("fusion") or {})
+    params.update({k: v for k, v in overrides.items() if v is not None})
+    return params
+
+
+def cmd_reid(args: argparse.Namespace) -> int:
+    """候補を融合して割り当て、Global ID を付ける。"""
+    _resolve_out(args)
+    from mct.appearance import appearance_params
+    from mct.evaluation import evaluate
+    from mct.fusion import METHODS
+    from mct.predictions import save_predictions
+    from mct.reid_pipeline import result_path, run_date
+    from mct.reid_report import (
+        LinkErrors, classify_links, gt_kind_counts, print_component_sizes, print_cost,
+        print_error_breakdown, print_kind_accuracy, print_results,
+    )
+
+    params = _fusion_params(args.params, alpha=args.alpha, no_match_score=args.no_match_score)
+    app_params = appearance_params(args.params)
+    dates = ALL_DATES if args.all_dates else [args.date]
+    methods = sorted(METHODS) if args.all_methods else [args.method]
+
+    print(f"α={params['alpha']} / α_self={params['alpha_self']}"
+          f" / 未対応 {params['no_match_score']}\n")
+
+    rows, days = [], []
+    for method in methods:
+        errors = LinkErrors()
+        kind_counts: dict[str, tuple[int, int]] = {}
+        assignments_by_date = []
+        n_correct = 0
+
+        for date in dates:
+            result = run_date(date, args.out, method, params, app_params)
+            dest = save_predictions(result.predictions, result_path(args.out, date, method))
+            days.append(result)
+            assignments_by_date.append(result.predictions.assignments)
+
+            correct = _correct_pairs_for(args, date)
+            n_correct += len(correct)
+            classify_links(result, correct, errors)
+            gt_kind_counts(result, correct, kind_counts)
+
+            print(f"手法{method} {date}: トラック {result.n_tracks} / 候補 "
+                  f"{result.n_candidates} / 採用 {result.n_links} / "
+                  f"Global ID {result.predictions.n_global_ids} -> {dest}")
+
+            if not args.no_eval:
+                rows.append((method, date, _evaluate_date(args, date, result)))
+
+        if not args.no_eval and method == methods[-1]:
+            method_days = [d for d in days if d.method == method]
+            print_error_breakdown(
+                errors, sum(d.n_links for d in method_days), n_correct,
+                rows[-1][2] if rows else None,
+            )
+            print_kind_accuracy(kind_counts)
+            print_component_sizes(assignments_by_date)
+
+    if rows:
+        print_results(rows)
+    print_cost(days)
+    return 0
+
+
+def _correct_pairs_for(args, date):
+    """その日の正解遷移を (tgt, src) の集合で返す。"""
+    from mct.st_pipeline import load_candidates
+
+    summaries, _, _ = load_candidates(date, args.out)
+    return _correct_pairs_and_summaries(args, date, summaries)[0]
+
+
+def _evaluate_date(args, date, result):
+    """1日分の ID 指標。トラックの対応付けは `_matchings` に任せる。"""
+    import warnings
+
+    from mct.config import load_params
+    from mct.evaluation import evaluate
+
+    ev_params = load_params(args.params).get("evaluation") or {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gt = _load_gt(args, date)
+    return evaluate(
+        result.predictions.assignments, gt, _matchings(args, gt, date, ev_params)
+    )
+
+
+def cmd_reid_sweep(args: argparse.Namespace) -> int:
+    """α と未対応スコアを振って IDF1 を比べる（手法⑥のみ）。"""
+    _resolve_out(args)
+    from mct.reid_sweep import print_report, run_sweep
+
+    dates = ALL_DATES if args.all_dates else [args.date]
+    run_sweep(args, dates, print_report)
+    return 0
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     from mct.cache import clear, list_entries
 
@@ -1165,6 +1266,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_appearance_args(p_apw)
     p_apw.set_defaults(func=cmd_app_sweep)
+
+    p_reid = sub.add_parser(
+        "reid", help="スコアを融合して割り当て、Global ID を統合する"
+    )
+    _add_appearance_args(p_reid)
+    p_reid.add_argument(
+        "--method", type=int, default=6, choices=range(1, 7),
+        help="比較手法 1〜6 (default: 6)",
+    )
+    p_reid.add_argument(
+        "--all-methods", action="store_true", help="6手法をまとめて実行する"
+    )
+    p_reid.add_argument("--alpha", type=float, help="時空間の重み（既定は params.yaml）")
+    p_reid.add_argument(
+        "--no-match-score", type=float, help="対応なしのスコア（既定は params.yaml）"
+    )
+    p_reid.add_argument(
+        "--no-eval", action="store_true", help="GT との突き合わせを行わない"
+    )
+    p_reid.set_defaults(func=cmd_reid)
+
+    p_rsw = sub.add_parser(
+        "reid-sweep", help="融合パラメータを振って IDF1 を比べる（手法⑥）"
+    )
+    _add_appearance_args(p_rsw)
+    p_rsw.set_defaults(func=cmd_reid_sweep)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')

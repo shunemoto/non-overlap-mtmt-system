@@ -25,13 +25,26 @@ class Link:
     score: float | None = None
     st: float | None = None          # 時空間の尤度
     app: float | None = None         # 外観の尤度
+    kind: str | None = None          # in_range / out_of_range / self_loop
+    zone_from: str | None = None     # 退出ゾーン
+    zone_to: str | None = None       # 出現ゾーン
+
+    @property
+    def from_key(self) -> tuple[str, int]:
+        return (self.from_cam, int(self.from_track))
+
+    @property
+    def to_key(self) -> tuple[str, int]:
+        return (self.to_cam, int(self.to_track))
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "from": {"cam": self.from_cam, "track": self.from_track},
             "to": {"cam": self.to_cam, "track": self.to_track},
         }
-        for key in ("score", "st", "app"):
+        # None のキーは落とす。誤り分析に使う列なので、入っていないことと
+        # 値が無いことを読み手が区別できるようにする。
+        for key in ("score", "st", "app", "kind", "zone_from", "zone_to"):
             value = getattr(self, key)
             if value is not None:
                 d[key] = value
@@ -47,6 +60,9 @@ class Link:
             score=d.get("score"),
             st=d.get("st"),
             app=d.get("app"),
+            kind=d.get("kind"),
+            zone_from=d.get("zone_from"),
+            zone_to=d.get("zone_to"),
         )
 
 
@@ -56,6 +72,8 @@ class Predictions:
     method: str = ""
     assignments: dict[str, dict[str, str]] = field(default_factory=dict)
     links: list[Link] = field(default_factory=list)
+    meta_extra: dict[str, Any] = field(default_factory=dict)
+    """実行条件（α や候補数など）。読み書きはするが評価には使わない。"""
 
     @property
     def n_global_ids(self) -> int:
@@ -66,7 +84,9 @@ class Predictions:
             "meta": {
                 "date": self.date,
                 "method": self.method,
+                **self.meta_extra,
                 "n_global_ids": self.n_global_ids,
+                "n_links": len(self.links),
             },
             "assignments": self.assignments,
             "links": [link.to_dict() for link in self.links],
@@ -78,6 +98,10 @@ class Predictions:
         return cls(
             date=str(meta.get("date", "")),
             method=str(meta.get("method", "")),
+            meta_extra={
+                k: v for k, v in meta.items()
+                if k not in ("date", "method", "n_global_ids", "n_links")
+            },
             assignments={
                 str(cam): {str(t): str(g) for t, g in tracks.items()}
                 for cam, tracks in (d.get("assignments") or {}).items()

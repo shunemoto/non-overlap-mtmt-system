@@ -59,9 +59,12 @@ appearance:
   sift_min_frames: 5 # 有効フレームがこれ未満の関節点は使わない
   lambda_missing: 0.9 # 根拠が片方しか無い候補に掛ける係数
 
+# --- フェーズ6: スコアの融合と ID 統合 ---
 fusion:
   alpha: 0.5 # 時空間の重み（幾何平均の指数）
-  alpha_self: 0.3 # 自己ループ時の時空間の重み
+  # 自己ループの時空間尤度は c_dwell 固定で順位付けの機能を持たない
+  # （AUC 0.30）のに対し、外観は同一カメラ内なので AUC 0.97 と高い。
+  alpha_self: 0.1 # 自己ループ時の時空間の重み
   no_match_score: 0.10 # 未対応のスコア
 
 # --- GT からの特徴抽出（gt-features / outputs_gt）---
