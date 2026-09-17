@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from mct.metrics import auc, format_quantiles
 from mct.spatiotemporal import KIND_IN_RANGE, KIND_OUT_OF_RANGE, KIND_SELF_LOOP, STScore
 
 __all__ = [
@@ -36,43 +37,6 @@ class Labelled:
     zone_pair: tuple[str, str, str, str] | None = None
 
 
-def auc(positive: list[float], negative: list[float]) -> float:
-    """正解の尤度が誤ペアより高い確率。同値は0.5として数える。
-
-    総当たりは O(n·m) になるので、順位和（Mann-Whitney U）から求める。
-    """
-    if not positive or not negative:
-        return float("nan")
-
-    values = np.concatenate([np.asarray(positive), np.asarray(negative)])
-    order = values.argsort(kind="mergesort")
-    ranks = np.empty(len(values), dtype=np.float64)
-    ranks[order] = np.arange(1, len(values) + 1)
-
-    # 同値には平均順位を割り当てる（同値を0.5として数えるのと等価）
-    sorted_values = values[order]
-    start = 0
-    for i in range(1, len(sorted_values) + 1):
-        if i == len(sorted_values) or sorted_values[i] != sorted_values[start]:
-            if i - start > 1:
-                ranks[order[start:i]] = ranks[order[start:i]].mean()
-            start = i
-
-    n_pos, n_neg = len(positive), len(negative)
-    rank_sum = ranks[:n_pos].sum()
-    return float((rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
-def _quantiles(values: list[float]) -> str:
-    if not values:
-        return "-"
-    a = np.asarray(values)
-    return (
-        f"{np.percentile(a,10):.3f} / {np.percentile(a,25):.3f} / {np.median(a):.3f} / "
-        f"{np.percentile(a,75):.3f} / {np.percentile(a,90):.3f}"
-    )
-
-
 def print_separation(labelled: list[Labelled]) -> float:
     """正解と誤ペアの尤度分布、および AUC。"""
     pos = [x.score.likelihood for x in labelled if x.correct]
@@ -83,8 +47,8 @@ def print_separation(labelled: list[Labelled]) -> float:
     print("尤度の分離度（本フェーズの成否指標）")
     print("=" * 72)
     print(f"  候補 {len(labelled)} 件（正解 {len(pos)} / 誤 {len(neg)}）")
-    print(f"  正解ペア  p10/p25/中央/p75/p90: {_quantiles(pos)}")
-    print(f"  誤ペア    p10/p25/中央/p75/p90: {_quantiles(neg)}")
+    print(f"  正解ペア  p10/p25/中央/p75/p90: {format_quantiles(pos)}")
+    print(f"  誤ペア    p10/p25/中央/p75/p90: {format_quantiles(neg)}")
     print(f"\n  AUC（全候補）: {overall:.3f}")
 
     # 全体の AUC には「探索時間範囲に入るか否か」の効果が混ざるので、
@@ -113,7 +77,7 @@ def print_kind_breakdown(labelled: list[Labelled]) -> None:
         values = [x.score.likelihood for x in items]
         print(
             f"  {kind:<14}{len(items):>8}{len(correct):>7}"
-            f"{100*len(correct)/max(1,len(items)):>7.1f}%   {_quantiles(values)}"
+            f"{100*len(correct)/max(1,len(items)):>7.1f}%   {format_quantiles(values)}"
         )
 
     missed = [x for x in labelled if x.correct and x.score.kind == KIND_OUT_OF_RANGE]

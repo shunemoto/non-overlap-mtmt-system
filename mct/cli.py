@@ -589,6 +589,276 @@ def _gt_feature_params(params_path) -> dict:
     return params
 
 
+def cmd_appearance(args: argparse.Namespace) -> int:
+    """トラック単位の外観記述子を作る。"""
+    _resolve_out(args)
+    from mct.appearance import appearance_params, build_descriptors, print_stats, write_descriptors
+    from mct.io_utils import load_tracking_result
+    from mct.pipeline import FILTERED_FILENAME
+
+    params = appearance_params(args.params)
+    dates = ALL_DATES if args.all_dates else [args.date]
+
+    for date in dates:
+        descriptors = []
+        for camera in ALL_CAMERAS:
+            source = Path(args.out) / date / camera / FILTERED_FILENAME
+            if not source.is_file():
+                continue
+            result = load_tracking_result(source)
+            built, stats = build_descriptors(result, source.parent, params)
+            print_stats(date, camera, stats)
+            descriptors.extend(built)
+
+        dest = write_descriptors(descriptors, date, args.out, params)
+        print(f"{date}: 記述子 {len(descriptors)} 件 -> {dest}\n")
+    return 0
+
+
+def _st_baseline(args, dates: list[str]) -> dict[str, float]:
+    """時空間側の AUC。比較の基準線なので、無ければ nan のまま返す。
+
+    `st_scores.json` を読むだけで、σ の推定はやり直さない。外観の設定を
+    変えるたびに時空間まで計算し直す必要はない。
+    """
+    import json
+    import math
+
+    from mct.metrics import auc
+
+    pos: dict[str, list[float]] = {"all": [], "in_range": [], "self_loop": []}
+    neg: dict[str, list[float]] = {"all": [], "in_range": [], "self_loop": []}
+    for date in dates:
+        path = Path(args.out) / date / "st_scores.json"
+        if not path.is_file():
+            continue
+        from mct.st_pipeline import load_candidates
+
+        summaries, candidates, _ = load_candidates(date, args.out)
+        correct, _ = _correct_pairs_and_summaries(args, date, summaries)
+        by_pair = {
+            ((s["tgt"][0], int(s["tgt"][1])), (s["src"][0], int(s["src"][1]))): s
+            for s in json.load(path.open(encoding="utf-8"))["scores"]
+        }
+        for candidate in candidates:
+            score = by_pair.get((candidate.tgt, candidate.src))
+            if score is None:
+                continue
+            value = float(score["likelihood"])
+            table = pos if (candidate.tgt, candidate.src) in correct else neg
+            table["all"].append(value)
+            if candidate.is_self_loop:
+                table["self_loop"].append(value)
+            elif candidate.in_search_range:
+                table["in_range"].append(value)
+
+    out = {k: auc(pos[k], neg[k]) for k in pos}
+    if all(math.isnan(v) for v in out.values()):
+        print("  ⚠ st_scores.json が無いため、時空間との比較は出せません"
+              "（先に st-scores を実行してください）")
+    return out
+
+
+ST_FIRST_RATE_NOTE = "時空間の1位率は st_scores.json から同じ分母で数え直した値"
+
+
+def _st_first_rate(args, dates: list[str], scope: str) -> dict[int, float]:
+    """時空間尤度での競合数別1位率。外観と同じ分母・同じ同値の扱いで数える。"""
+    import collections
+    import json
+
+    from mct.st_pipeline import load_candidates
+
+    by_competitors: dict[int, list[bool]] = collections.defaultdict(list)
+    for date in dates:
+        path = Path(args.out) / date / "st_scores.json"
+        if not path.is_file():
+            continue
+        summaries, candidates, _ = load_candidates(date, args.out)
+        correct, _ = _correct_pairs_and_summaries(args, date, summaries)
+        by_pair = {
+            ((s["tgt"][0], int(s["tgt"][1])), (s["src"][0], int(s["src"][1]))): s
+            for s in json.load(path.open(encoding="utf-8"))["scores"]
+        }
+
+        grouped: dict[tuple[str, int], list] = collections.defaultdict(list)
+        for candidate in candidates:
+            score = by_pair.get((candidate.tgt, candidate.src))
+            if score is None:
+                continue
+            keep = (
+                candidate.is_self_loop if scope == "self_loop"
+                else (candidate.in_search_range and not candidate.is_self_loop)
+            )
+            if keep:
+                grouped[candidate.src].append((candidate, float(score["likelihood"])))
+
+        for items in grouped.values():
+            for candidate, value in items:
+                if (candidate.tgt, candidate.src) not in correct:
+                    continue
+                higher = sum(1 for _, v in items if v > value)
+                tied = sum(1 for _, v in items if v == value)
+                rank = higher + (tied + 1) / 2.0
+                by_competitors[min(len(items), 4)].append(rank <= 1.0)
+
+    return {
+        k: 100 * sum(v) / len(v) for k, v in by_competitors.items() if v
+    }
+
+
+def cmd_app_scores(args: argparse.Namespace) -> int:
+    """候補に外観類似度を付けて書き出し、時空間と比べる。"""
+    _resolve_out(args)
+    from mct.app_report import (
+        LabelledApp, plot_separation, print_joint_contribution,
+        print_missing_breakdown, print_ranks, print_self_loop_separation,
+        print_separation,
+    )
+    from mct.appearance import DESCRIPTOR_FILENAME, appearance_params, load_descriptors
+    from mct.appearance_sim import score_pairs, write_scores
+    from mct.st_pipeline import load_candidates
+
+    params = appearance_params(args.params)
+    dates = ALL_DATES if args.all_dates else [args.date]
+
+    labelled: list[LabelledApp] = []
+    descriptors_by_date: dict[str, dict] = {}
+    n_skipped = 0
+
+    for date in dates:
+        path = Path(args.out) / date / DESCRIPTOR_FILENAME
+        if not path.is_file():
+            raise SystemExit(
+                f"{path} がありません。先に appearance を実行してください。"
+            )
+        descriptors = load_descriptors(path)
+        descriptors_by_date[date] = descriptors
+
+        summaries, candidates, _ = load_candidates(date, args.out)
+        scores = score_pairs(candidates, descriptors, params)
+        dest = write_scores(date, args.out, scores, params)
+
+        correct, _ = _correct_pairs_and_summaries(args, date, summaries)
+        for candidate, score in zip(candidates, scores):
+            if score is None:
+                n_skipped += 1
+                continue
+            labelled.append(
+                LabelledApp(
+                    score, candidate, (candidate.tgt, candidate.src) in correct, date
+                )
+            )
+        print(f"{date}: 候補 {len(candidates)} 件 / 採点 {len(candidates)-n_skipped} 件 -> {dest}")
+
+    st = _st_baseline(args, dates)
+    print_separation(labelled, st.get("all"), st.get("in_range"))
+    print_self_loop_separation(labelled, st.get("self_loop"))
+    print_missing_breakdown(labelled, n_skipped)
+
+    print("\n" + "=" * 78)
+    print("外観のみで順位を付けた場合（5c）")
+    print("=" * 78)
+    print(f"  ※ {ST_FIRST_RATE_NOTE}")
+    print_ranks(labelled, "s_app", _st_first_rate(args, dates, "in_range"), "in_range")
+    print_ranks(
+        labelled, "s_app", _st_first_rate(args, dates, "self_loop"), "self_loop"
+    )
+
+    print_joint_contribution(labelled, descriptors_by_date)
+
+    png = plot_separation(labelled, Path(args.out) / "viz" / "app_likelihood_separation.png")
+    print(f"\nwrote {png}")
+    return 0
+
+
+def cmd_app_sweep(args: argparse.Namespace) -> int:
+    """外観パラメータを振って AUC を比べる。"""
+    _resolve_out(args)
+    from mct.app_sweep import (
+        ACHROMATIC, HIST_BINS, MIN_GRADIENTS, PATCH_RATIOS, SweepResult,
+        _color_key, _merge, _sift_key, collect_variants, evaluate, print_report,
+    )
+    from mct.appearance import appearance_params
+    from mct.st_pipeline import load_candidates
+
+    params = appearance_params(args.params)
+    dates = ALL_DATES if args.all_dates else [args.date]
+
+    colors: dict[str, dict] = {}
+    sifts: dict[str, dict] = {}
+    candidates: list[tuple[str, object]] = []
+    correct: set = set()
+
+    for date in dates:
+        print(f"{date}: crop を読み込み中...")
+        c, s = collect_variants(args.out, date, list(ALL_CAMERAS), params)
+        colors.setdefault(date, {}).update(c)
+        sifts.setdefault(date, {}).update(s)
+
+        summaries, items, _ = load_candidates(date, args.out)
+        candidates.extend((date, x) for x in items)
+        for tgt, src in _correct_pairs_and_summaries(args, date, summaries)[0]:
+            correct.add((date, tgt, src))
+
+    print(f"\n候補 {len(candidates)} 件 / 正解 {len(correct)} 件")
+
+    # 色: SIFT は現行設定で固定し、色だけを振る
+    base_sift = _sift_key(
+        float(params["sift_patch_ratio"]), float(params["sift_min_gradient"])
+    )
+    results = []
+    for bins in HIST_BINS:
+        for threshold in ACHROMATIC:
+            key = _color_key(bins, threshold)
+            merged = {
+                d: _merge(colors[d][key], sifts[d].get(base_sift, {})) for d in dates
+            }
+            a, b, c = evaluate(candidates, correct, merged, "s_color", params)
+            results.append(SweepResult(key, a, b, c))
+    current_color = _color_key(
+        tuple(int(v) for v in params["hist_bins"]),
+        params.get("achromatic_threshold"),
+    )
+    print_report("色ヒストグラムの掃引（S_color の AUC）", results, current_color)
+
+    # SIFT: 色は現行設定で固定し、SIFT だけを振る
+    results = []
+    for ratio in PATCH_RATIOS:
+        for min_gradient in MIN_GRADIENTS:
+            key = _sift_key(ratio, min_gradient)
+            merged = {
+                d: _merge(colors[d][current_color], sifts[d][key]) for d in dates
+            }
+            a, b, c = evaluate(candidates, correct, merged, "s_sift", params)
+            valid = [
+                sum(x.sift_valid) for d in dates for x in sifts[d][key].values()
+            ]
+            extra = f"有効関節点 平均 {sum(valid)/max(1,len(valid)):.2f} / 6"
+            results.append(SweepResult(key, a, b, c, extra))
+    print_report("SIFT の掃引（S_sift の AUC）", results, base_sift)
+    return 0
+
+
+def _add_appearance_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--date", help='撮影日 (例: "0720")')
+    parser.add_argument("--all-dates", action="store_true", help="全4日を処理する")
+    parser.add_argument(
+        "--out", "--out-root", dest="out", default=DEFAULT_OUT_ROOT,
+        help=f"出力ルートディレクトリ (default: {DEFAULT_OUT_ROOT})",
+    )
+    parser.add_argument("--config", default=DEFAULT_CAMERAS)
+    parser.add_argument(
+        "--params", default=DEFAULT_CONFIG,
+        help=f"パラメータ YAML (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
+    parser.add_argument(
+        "--use-gt", action="store_true",
+        help=f"GT 由来の特徴（{GT_OUT_ROOT}/）を入力にする",
+    )
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     from mct.cache import clear, list_entries
 
@@ -884,6 +1154,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_gtf.add_argument("--params", default=DEFAULT_CONFIG)
     p_gtf.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
     p_gtf.set_defaults(func=cmd_gt_features)
+
+    p_app = sub.add_parser(
+        "appearance", help="トラックごとの外観記述子（色ヒストグラム・SIFT）を作る"
+    )
+    _add_appearance_args(p_app)
+    p_app.set_defaults(func=cmd_appearance)
+
+    p_apps = sub.add_parser(
+        "app-scores", help="候補に外観類似度を付けて書き出し、時空間と比べる"
+    )
+    _add_appearance_args(p_apps)
+    p_apps.set_defaults(func=cmd_app_scores)
+
+    p_apw = sub.add_parser(
+        "app-sweep", help="外観パラメータを振って AUC を比べる"
+    )
+    _add_appearance_args(p_apw)
+    p_apw.set_defaults(func=cmd_app_sweep)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")
     p_eval.add_argument("--date", help='撮影日 (例: "0720")')

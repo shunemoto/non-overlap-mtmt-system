@@ -46,11 +46,18 @@ spatiotemporal:
   sigma_default_frames: 60 # 共通σの初期値（calibrate-sigma で上書きされる）
   # dir_frames は filtering 側の値を使う（遷移領域の判定と食い違わせないため）
 
+# --- フェーズ5: 外観類似度 ---
 appearance:
-  hist_bins: [12, 12]
-  sift_patch_ratio: 0.07 # r = 0.07 * h
-  sift_min_bbox_height: 200
-  upper_lower_split: "hip" # 上下分割の基準
+  hist_bins: [12, 12] # H×S の格子。無彩色ビン1つを足して 145 次元
+  achromatic_threshold: 0.15 # 彩度がこれ未満の画素は色相を使わず無彩色ビンへ
+  sift_patch_ratio: 0.07 # 記述半径 r = 0.07 * bbox 高
+  sift_patch_size: 32 # r によらずこの大きさへ揃えてから記述する
+  sift_min_bbox_height: 200 # これ未満の bbox では SIFT を計算しない
+  # パッチの平均勾配強度がこれ未満の関節点は無効。OpenCV の SIFT は記述子を
+  # 内部で正規化して返すので、記述子のノルムではテクスチャの弱さを測れない。
+  sift_min_gradient: 0.01
+  sift_min_frames: 5 # 有効フレームがこれ未満の関節点は使わない
+  lambda_missing: 0.9 # 根拠が片方しか無い候補に掛ける係数
 
 fusion:
   alpha: 0.5 # 時空間の重み（幾何平均の指数）
