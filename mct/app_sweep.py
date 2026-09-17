@@ -4,9 +4,8 @@ crop を**1回だけ読んで全変種の記述子を同時に作る**。設定�
 読み直すと、変種の数だけ実行時間が伸びる。1トラック分の画素を持っている
 間に全変種を計算して捨てるので、メモリも増えない。
 
-`sift_min_gradient` はフレームごとの平均勾配を保持しておけば集約のときに
-閾値を変えるだけで済むので、パッチの切り出しと記述子の計算は
-`sift_patch_ratio` の数（3通り）で足りる。
+記述子の計算は `sift_patch_ratio` の数だけで足りる。集約（フレーム平均）は
+画素を持たなくてもできるので、切り出しと分けてある。
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ import cv2
 import numpy as np
 
 from mct.appearance import (
+    N_JOINTS,
     AppearanceDescriptor,
     FrameFeature,
     aggregate,
@@ -33,14 +33,15 @@ from mct.io_utils import crop_path, load_tracking_result, mask_path
 from mct.metrics import auc
 
 __all__ = [
-    "HIST_BINS", "ACHROMATIC", "PATCH_RATIOS", "MIN_GRADIENTS",
+    "HIST_BINS", "ACHROMATIC", "PATCH_RATIOS",
     "SweepResult", "collect_variants", "evaluate", "print_report",
 ]
 
 HIST_BINS = ((8, 8), (12, 12), (16, 16))
 ACHROMATIC = (0.10, 0.15, 0.20, None)
-PATCH_RATIOS = (0.05, 0.07, 0.09)
-MIN_GRADIENTS = (0.0, 0.005, 0.01, 0.02, 0.05)
+# 0.09 を超えると、カメラ間では尺度と視点の差を拾って下がる。両端が下がる
+# ことを確かめられるよう、頂点の前後を含めた範囲にしてある。
+PATCH_RATIOS = (0.05, 0.07, 0.09, 0.11, 0.13)
 
 
 def _color_key(bins: tuple[int, int], threshold: float | None) -> str:
@@ -48,8 +49,8 @@ def _color_key(bins: tuple[int, int], threshold: float | None) -> str:
     return f"bins={bins[0]}x{bins[1]} achrom={label}"
 
 
-def _sift_key(ratio: float, min_gradient: float) -> str:
-    return f"ratio={ratio:.2f} min_grad={min_gradient:.3f}"
+def _sift_key(ratio: float) -> str:
+    return f"ratio={ratio:.2f}"
 
 
 @dataclass
@@ -90,10 +91,10 @@ def collect_variants(
                 crop = cv2.imread(str(crop_path(directory, track_id, point.frame_idx)))
                 if crop is None:
                     continue
-                source = mask_path(directory, track_id, point.frame_idx)
+                mask_file = mask_path(directory, track_id, point.frame_idx)
                 mask = (
-                    cv2.imread(str(source), cv2.IMREAD_GRAYSCALE)
-                    if source.is_file() else None
+                    cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+                    if mask_file.is_file() else None
                 )
                 if mask is not None and mask.shape[:2] != crop.shape[:2]:
                     mask = None
@@ -107,17 +108,17 @@ def collect_variants(
                             {"hist_bins": bins, "achromatic_threshold": threshold},
                         )
                         color_frames[_color_key(bins, threshold)][key].append(
-                            FrameFeature(upper, lower, [None] * 6, [0.0] * 6, "", True)
+                            FrameFeature(upper, lower, [None] * N_JOINTS, "", True)
                         )
 
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 for ratio in PATCH_RATIOS:
-                    params = dict(base, sift_patch_ratio=ratio)
-                    sift, gradients = sift_features(
-                        gray, point.keypoints, point.crop_box, point.bbox, params
+                    sift = sift_features(
+                        gray, point.keypoints, point.crop_box, point.bbox,
+                        dict(base, sift_patch_ratio=ratio),
                     )
                     sift_frames[ratio][key].append(
-                        FrameFeature(None, None, sift, gradients, "", True)
+                        FrameFeature(None, None, sift, "", True)
                     )
 
     colors = {
@@ -128,12 +129,10 @@ def collect_variants(
         for key, table in color_frames.items()
     }
     sifts = {
-        _sift_key(ratio, g): {
-            k: aggregate(k[0], k[1], frames, dict(base, sift_min_gradient=g))
-            for k, frames in table.items()
+        _sift_key(ratio): {
+            k: aggregate(k[0], k[1], frames, base) for k, frames in table.items()
         }
         for ratio, table in sift_frames.items()
-        for g in MIN_GRADIENTS
     }
     return colors, sifts
 
@@ -150,7 +149,7 @@ def _merge(
             camera=key[0], track_id=key[1],
             hist_upper=c.hist_upper, hist_lower=c.hist_lower,
             sift=None if s is None else s.sift,
-            sift_valid=[False] * 6 if s is None else s.sift_valid,
+            sift_valid=[False] * N_JOINTS if s is None else s.sift_valid,
             n_frames_used=c.n_frames_used,
         )
     return out

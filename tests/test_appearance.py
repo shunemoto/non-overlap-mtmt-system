@@ -29,8 +29,6 @@ PARAMS = {
     "achromatic_threshold": 0.15,
     "sift_patch_ratio": 0.07,
     "sift_patch_size": 32,
-    "sift_min_bbox_height": 200,
-    "sift_min_gradient": 0.01,
     "sift_min_frames": 5,
     "lambda_missing": 0.9,
 }
@@ -191,24 +189,23 @@ def test_patch_window_rejects_windows_larger_than_the_crop() -> None:
 # --- 関節点 ---------------------------------------------------------------
 
 
-def test_joint_points_derives_neck_and_torso() -> None:
+def test_joint_points_are_five_with_a_derived_neck() -> None:
     kps = _keypoints(i5=(100, 200, 0.9), i6=(140, 200, 0.9),
                      i11=(100, 400, 0.9), i12=(140, 400, 0.9))
 
     points = joint_points(kps)
 
-    assert len(points) == N_JOINTS
+    assert len(points) == N_JOINTS == 5
     assert points[4] == pytest.approx((120.0, 200.0))     # 首元 = 肩の中点
-    assert points[5] == pytest.approx((120.0, 300.0))     # 胴体中心
 
 
-def test_derived_points_need_every_source_joint() -> None:
-    kps = _keypoints(i5=(100, 200, 0.9), i6=(140, 200, 0.9), i11=(100, 400, 0.9))
+def test_neck_needs_both_shoulders() -> None:
+    kps = _keypoints(i5=(100, 200, 0.9), i11=(100, 400, 0.9), i12=(140, 400, 0.9))
 
     points = joint_points(kps)
 
-    assert points[4] is not None          # 首元は肩2点だけで作れる
-    assert points[5] is None              # 胴体中心は腰が片方欠けると作れない
+    assert points[4] is None              # 肩が片方欠けると首元は作れない
+    assert points[2] is not None          # 腰はそのまま残る
 
 
 # --- SIFT -----------------------------------------------------------------
@@ -243,8 +240,8 @@ def test_sift_is_computed_upright() -> None:
     kps = _full_keypoints()
     box, bbox = [0.0, 0.0, 400.0, 400.0], [0.0, 0.0, 200.0, 400.0]
 
-    straight, _ = sift_features(_stripes(), kps, box, bbox, PARAMS)
-    rotated, _ = sift_features(np.rot90(_stripes()).copy(), kps, box, bbox, PARAMS)
+    straight = sift_features(_stripes(), kps, box, bbox, PARAMS)
+    rotated = sift_features(np.rot90(_stripes()).copy(), kps, box, bbox, PARAMS)
 
     # どちらも中身のある記述子であることを確かめてから比べる
     assert float(np.linalg.norm(straight[0])) == pytest.approx(1.0)
@@ -252,30 +249,32 @@ def test_sift_is_computed_upright() -> None:
     assert float(np.dot(straight[0], rotated[0])) < 0.5
 
 
-def test_flat_patch_has_no_gradient() -> None:
+def test_flat_patch_yields_no_descriptor() -> None:
+    """無地のパッチでは SIFT が全ゼロを返すので、記述子を作らない。"""
     crop = np.full((400, 400), 128, dtype=np.uint8)
 
-    descriptors, gradients = sift_features(
+    descriptors = sift_features(
         crop, _full_keypoints(), [0.0, 0.0, 400.0, 400.0],
         [0.0, 0.0, 200.0, 400.0], PARAMS,
     )
 
-    assert all(g == pytest.approx(0.0) for g in gradients)
     assert all(d is None for d in descriptors)
 
 
-def test_small_bbox_skips_sift() -> None:
-    descriptors, gradients = sift_features(
-        _textured_crop(), _full_keypoints(), [0.0, 0.0, 400.0, 400.0],
-        [0.0, 0.0, 100.0, 150.0], PARAMS,       # 高さ 150 < 200
+def test_undetected_joints_have_no_descriptor() -> None:
+    kps = _keypoints(i5=(170, 150, 0.9), i6=(230, 150, 0.9))   # 腰は未検出
+
+    descriptors = sift_features(
+        _textured_crop(), kps, [0.0, 0.0, 400.0, 400.0],
+        [0.0, 0.0, 200.0, 400.0], PARAMS,
     )
 
-    assert all(d is None for d in descriptors)
-    assert all(g == 0.0 for g in gradients)
+    assert descriptors[0] is not None and descriptors[1] is not None
+    assert descriptors[2] is None and descriptors[3] is None
 
 
 def test_sift_descriptors_are_l2_normalised() -> None:
-    descriptors, _ = sift_features(
+    descriptors = sift_features(
         _textured_crop(), _full_keypoints(), [0.0, 0.0, 400.0, 400.0],
         [0.0, 0.0, 200.0, 400.0], PARAMS,
     )
@@ -289,23 +288,22 @@ def test_sift_descriptors_are_l2_normalised() -> None:
 # --- 集約 -----------------------------------------------------------------
 
 
-def _frame(hist_value: float, sift_value: float, gradient: float) -> FrameFeature:
+def _frame(hist_value: float, *, with_sift: bool = True) -> FrameFeature:
     hist = np.full(145, 0.0)
     hist[0] = hist_value
     hist[1] = 1.0 - hist_value
     vector = np.zeros(128)
-    vector[0] = sift_value
-    vector[1] = np.sqrt(max(0.0, 1.0 - sift_value**2))
+    vector[0] = 1.0
     return FrameFeature(
         hist_upper=hist, hist_lower=hist,
-        sift=[vector] * N_JOINTS, gradients=[gradient] * N_JOINTS,
+        sift=[vector if with_sift else None] * N_JOINTS,
         split_source="hip", has_mask=True,
     )
 
 
 def test_aggregate_uses_the_median_of_each_bin() -> None:
     """外れた1フレームに引きずられない。"""
-    frames = [_frame(0.5, 1.0, 1.0) for _ in range(5)] + [_frame(0.0, 1.0, 1.0)]
+    frames = [_frame(0.5) for _ in range(5)] + [_frame(0.0)]
 
     descriptor = aggregate("camA", 1, frames, PARAMS)
 
@@ -313,8 +311,8 @@ def test_aggregate_uses_the_median_of_each_bin() -> None:
     assert sum(descriptor.hist_upper) == pytest.approx(1.0)
 
 
-def test_low_gradient_joints_become_invalid() -> None:
-    frames = [_frame(0.5, 1.0, 0.001) for _ in range(30)]
+def test_joints_without_descriptors_become_invalid() -> None:
+    frames = [_frame(0.5, with_sift=False) for _ in range(30)]
 
     descriptor = aggregate("camA", 1, frames, PARAMS)
 
@@ -323,7 +321,7 @@ def test_low_gradient_joints_become_invalid() -> None:
 
 
 def test_joint_needs_min_frames() -> None:
-    frames = [_frame(0.5, 1.0, 1.0) for _ in range(4)]      # sift_min_frames=5
+    frames = [_frame(0.5) for _ in range(4)]                # sift_min_frames=5
 
     descriptor = aggregate("camA", 1, frames, PARAMS)
 
@@ -331,7 +329,7 @@ def test_joint_needs_min_frames() -> None:
 
 
 def test_joint_at_min_frames_is_valid() -> None:
-    frames = [_frame(0.5, 1.0, 1.0) for _ in range(5)]
+    frames = [_frame(0.5) for _ in range(5)]
 
     descriptor = aggregate("camA", 1, frames, PARAMS)
 
@@ -366,10 +364,10 @@ def test_descriptor_roundtrip() -> None:
 
 def test_params_merge_defaults_and_overrides(tmp_path) -> None:
     path = tmp_path / "params.yaml"
-    path.write_text("appearance:\n  sift_min_gradient: 0.05\n", encoding="utf-8")
+    path.write_text("appearance:\n  sift_patch_ratio: 0.05\n", encoding="utf-8")
 
     params = appearance_params(path, lambda_missing=0.5)
 
-    assert params["sift_min_gradient"] == 0.05      # YAML
-    assert params["hist_bins"] == [12, 12]          # 既定値
+    assert params["sift_patch_ratio"] == 0.05       # YAML
+    assert params["hist_bins"] == [8, 8]            # 既定値
     assert params["lambda_missing"] == 0.5          # 明示的な上書き

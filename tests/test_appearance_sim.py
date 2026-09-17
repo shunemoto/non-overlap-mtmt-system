@@ -128,7 +128,7 @@ def test_identical_sift_gives_one() -> None:
 
 
 def test_only_jointly_valid_joints_are_used() -> None:
-    a = _descriptor(n_valid=6)
+    a = _descriptor(n_valid=N_JOINTS)
     b = _descriptor(track_id=2, seed=0, n_valid=3)
 
     value, n_joints = sift_similarity(a, b)

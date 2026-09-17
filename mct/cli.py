@@ -776,10 +776,10 @@ def cmd_app_sweep(args: argparse.Namespace) -> int:
     """外観パラメータを振って AUC を比べる。"""
     _resolve_out(args)
     from mct.app_sweep import (
-        ACHROMATIC, HIST_BINS, MIN_GRADIENTS, PATCH_RATIOS, SweepResult,
+        ACHROMATIC, HIST_BINS, PATCH_RATIOS, SweepResult,
         _color_key, _merge, _sift_key, collect_variants, evaluate, print_report,
     )
-    from mct.appearance import appearance_params
+    from mct.appearance import N_JOINTS, appearance_params
     from mct.st_pipeline import load_candidates
 
     params = appearance_params(args.params)
@@ -804,9 +804,7 @@ def cmd_app_sweep(args: argparse.Namespace) -> int:
     print(f"\n候補 {len(candidates)} 件 / 正解 {len(correct)} 件")
 
     # 色: SIFT は現行設定で固定し、色だけを振る
-    base_sift = _sift_key(
-        float(params["sift_patch_ratio"]), float(params["sift_min_gradient"])
-    )
+    base_sift = _sift_key(float(params["sift_patch_ratio"]))
     results = []
     for bins in HIST_BINS:
         for threshold in ACHROMATIC:
@@ -825,17 +823,12 @@ def cmd_app_sweep(args: argparse.Namespace) -> int:
     # SIFT: 色は現行設定で固定し、SIFT だけを振る
     results = []
     for ratio in PATCH_RATIOS:
-        for min_gradient in MIN_GRADIENTS:
-            key = _sift_key(ratio, min_gradient)
-            merged = {
-                d: _merge(colors[d][current_color], sifts[d][key]) for d in dates
-            }
-            a, b, c = evaluate(candidates, correct, merged, "s_sift", params)
-            valid = [
-                sum(x.sift_valid) for d in dates for x in sifts[d][key].values()
-            ]
-            extra = f"有効関節点 平均 {sum(valid)/max(1,len(valid)):.2f} / 6"
-            results.append(SweepResult(key, a, b, c, extra))
+        key = _sift_key(ratio)
+        merged = {d: _merge(colors[d][current_color], sifts[d][key]) for d in dates}
+        a, b, c = evaluate(candidates, correct, merged, "s_sift", params)
+        valid = [sum(x.sift_valid) for d in dates for x in sifts[d][key].values()]
+        extra = f"有効関節点 平均 {sum(valid)/max(1,len(valid)):.2f} / {N_JOINTS}"
+        results.append(SweepResult(key, a, b, c, extra))
     print_report("SIFT の掃引（S_sift の AUC）", results, base_sift)
     return 0
 

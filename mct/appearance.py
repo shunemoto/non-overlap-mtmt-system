@@ -52,19 +52,19 @@ DESCRIPTOR_FILENAME = "appearance.json"
 L_SHOULDER, R_SHOULDER = 5, 6
 L_HIP, R_HIP = 11, 12
 
-JOINT_NAMES = ("L肩", "R肩", "L腰", "R腰", "首元", "胴体中心")
+# 胴体中心（肩と腰の中点）は単独 AUC が 0.58〜0.60 とほぼ偶然で、肩と腰の
+# パッチに大きく重なるため独自の情報を持たない。5点の平均を薄めるだけなので外した。
+JOINT_NAMES = ("L肩", "R肩", "L腰", "R腰", "首元")
 N_JOINTS = len(JOINT_NAMES)
 
 # 肩から bbox 下辺までのどこで上下を分けるか（腰が取れなかったときの代用）
 SHOULDER_TO_HIP_RATIO = 0.45
 
 DEFAULT_APPEARANCE: dict[str, Any] = {
-    "hist_bins": [12, 12],
-    "achromatic_threshold": 0.15,
-    "sift_patch_ratio": 0.07,
+    "hist_bins": [8, 8],
+    "achromatic_threshold": 0.10,
+    "sift_patch_ratio": 0.09,
     "sift_patch_size": 32,
-    "sift_min_bbox_height": 200,
-    "sift_min_gradient": 0.01,
     "sift_min_frames": 5,
     "lambda_missing": 0.9,
 }
@@ -198,10 +198,10 @@ def _histogram(
 
 
 def joint_points(keypoints: list[list[float]] | None) -> list[tuple[float, float] | None]:
-    """記述する6点（元画像座標系）。取れない点は None。
+    """記述する5点（元画像座標系）。取れない点は None。
 
-    肩・腰の4点に加えて、首元（肩の中点）と胴体中心（肩と腰の中点）を足す。
-    服の柄は胴体の真ん中に出ることが多く、関節そのものより情報が乗る。
+    肩・腰の4点に加えて、首元（肩の中点）を足す。首元は胸元の柄や襟の形が
+    出るうえ、肩の2点とはパッチが重なりにくい位置にある。
     """
     def get(i: int) -> tuple[float, float] | None:
         if keypoints is None or i >= len(keypoints) or keypoints[i][2] <= 0:
@@ -220,9 +220,7 @@ def joint_points(keypoints: list[list[float]] | None) -> list[tuple[float, float
             float(np.mean([p[1] for p in usable])),
         )
 
-    neck = mid(ls, rs)
-    torso = mid(ls, rs, lh, rh)
-    return [ls, rs, lh, rh, neck, torso]
+    return [ls, rs, lh, rh, mid(ls, rs)]
 
 
 def patch_window(
@@ -251,8 +249,8 @@ def sift_features(
     crop_box: list[float],
     bbox: list[float],
     params: dict[str, Any],
-) -> tuple[list[np.ndarray | None], list[float]]:
-    """6点分の SIFT 記述子（L2 正規化済み）と、各パッチの平均勾配。
+) -> list[np.ndarray | None]:
+    """5点分の SIFT 記述子（L2 正規化済み）。取れない点は None。
 
     骨格点は元画像座標系なので crop の原点を引いて crop 座標系に直す。
     主方向は推定せず `angle=0` に固定する（`compute` を使い
@@ -264,10 +262,6 @@ def sift_features(
     """
     size = int(params["sift_patch_size"])
     descriptors: list[np.ndarray | None] = [None] * N_JOINTS
-    gradients: list[float] = [0.0] * N_JOINTS
-
-    if float(bbox[3]) < float(params["sift_min_bbox_height"]):
-        return descriptors, gradients
 
     radius = float(params["sift_patch_ratio"]) * float(bbox[3])
     height, width = crop_gray.shape[:2]
@@ -286,8 +280,6 @@ def sift_features(
         patch = cv2.resize(
             crop_gray[y : y + h, x : x + w], (size, size), interpolation=cv2.INTER_AREA
         )
-        gradients[j] = _mean_gradient(patch)
-
         _, desc = _sift().compute(patch, [kp])
         if desc is None or len(desc) == 0:
             continue
@@ -297,20 +289,7 @@ def sift_features(
             continue                       # 完全に平坦なパッチ
         descriptors[j] = vector / norm
 
-    return descriptors, gradients
-
-
-def _mean_gradient(patch: np.ndarray) -> float:
-    """パッチの平均勾配強度。テクスチャの乏しさを測る。
-
-    OpenCV の SIFT は記述子を内部で正規化して返すため、記述子の L2 ノルムは
-    「平坦なら 0、それ以外はほぼ 512」の二値にしかならず、テクスチャの強さを
-    測れない。画素側で測る必要がある。
-    """
-    f = patch.astype(np.float32) / 255.0
-    gx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
-    return float(np.hypot(gx, gy).mean())
+    return descriptors
 
 
 # --------------------------------------------------------------------------
@@ -325,7 +304,6 @@ class FrameFeature:
     hist_upper: np.ndarray | None
     hist_lower: np.ndarray | None
     sift: list[np.ndarray | None]
-    gradients: list[float]
     split_source: str
     has_mask: bool
 
@@ -396,7 +374,6 @@ def aggregate(
     camera: str, track_id: int, frames: list[FrameFeature], params: dict[str, Any]
 ) -> AppearanceDescriptor:
     """フレーム列を1組の記述子にまとめる。"""
-    min_gradient = float(params["sift_min_gradient"])
     min_frames = int(params["sift_min_frames"])
 
     hist_upper = _median_hist([f.hist_upper for f in frames if f.hist_upper is not None])
@@ -405,10 +382,7 @@ def aggregate(
     sift: list[list[float]] = []
     valid: list[bool] = []
     for j in range(N_JOINTS):
-        usable = [
-            f.sift[j] for f in frames
-            if f.sift[j] is not None and f.gradients[j] >= min_gradient
-        ]
+        usable = [f.sift[j] for f in frames if f.sift[j] is not None]
         if len(usable) < min_frames:
             sift.append([0.0] * 128)
             valid.append(False)
@@ -472,11 +446,9 @@ def read_frame(
     upper, lower = color_histogram(crop, mask, row, params)
 
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    sift, gradients = sift_features(
-        gray, point.keypoints, point.crop_box, point.bbox, params
-    )
+    sift = sift_features(gray, point.keypoints, point.crop_box, point.bbox, params)
     return FrameFeature(
-        hist_upper=upper, hist_lower=lower, sift=sift, gradients=gradients,
+        hist_upper=upper, hist_lower=lower, sift=sift,
         split_source=source, has_mask=mask is not None,
     )
 

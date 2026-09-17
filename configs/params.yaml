@@ -48,14 +48,14 @@ spatiotemporal:
 
 # --- フェーズ5: 外観類似度 ---
 appearance:
-  hist_bins: [12, 12] # H×S の格子。無彩色ビン1つを足して 145 次元
-  achromatic_threshold: 0.15 # 彩度がこれ未満の画素は色相を使わず無彩色ビンへ
-  sift_patch_ratio: 0.07 # 記述半径 r = 0.07 * bbox 高
+  # 掃引（app-sweep）で AUC が最大になった組み合わせ。ビンを細かくすると、
+  # 同じ服でも撮影ごとに色相が数度ずれて別のビンに落ちるため下がる。
+  hist_bins: [8, 8] # H×S の格子。無彩色ビン1つを足して 65 次元
+  achromatic_threshold: 0.10 # 彩度がこれ未満の画素は色相を使わず無彩色ビンへ
+  # 0.09 が頂点。これ以上広げるとカメラ間で尺度と視点の差を拾って下がる
+  # （同一カメラ内の自己ループだけは広いほど上がる）。
+  sift_patch_ratio: 0.09 # 記述半径 r = 0.09 * bbox 高
   sift_patch_size: 32 # r によらずこの大きさへ揃えてから記述する
-  sift_min_bbox_height: 200 # これ未満の bbox では SIFT を計算しない
-  # パッチの平均勾配強度がこれ未満の関節点は無効。OpenCV の SIFT は記述子を
-  # 内部で正規化して返すので、記述子のノルムではテクスチャの弱さを測れない。
-  sift_min_gradient: 0.01
   sift_min_frames: 5 # 有効フレームがこれ未満の関節点は使わない
   lambda_missing: 0.9 # 根拠が片方しか無い候補に掛ける係数
 
