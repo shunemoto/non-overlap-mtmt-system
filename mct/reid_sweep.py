@@ -49,6 +49,10 @@ NO_MATCH_SCORES = (0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70)
 DWELL_KS = (1.5, 2.0, 2.5, 3.0, 3.5)
 DWELL_ALPHAS = (0.0, 0.1, 0.2, 0.3, 0.5)
 
+# 種類ごとに融合の式を変える案の検証で使う格子
+KIND_ALPHAS = (0.0, 0.1, 0.2, 0.3, 0.5)
+KIND_KS = (1.5, 2.0, 2.5, 3.0)
+
 METHOD = METHODS[6]
 
 
@@ -131,12 +135,17 @@ def _st_value(day: DayInputs, pair, params: dict[str, Any]) -> float | None:
 
 def _run(day: DayInputs, params: dict[str, Any]) -> tuple[float, dict[str, tuple[int, int]]]:
     """(IDF1, 種類ごとの (統合できた数, 正解数))。融合と割当だけをやり直す。"""
+    only_in_range = bool(params.get("in_range_only"))
     scored = {}
     for candidate in day.candidates:
         pair = (candidate.tgt, candidate.src)
+        kind = day.kinds.get(pair)
+        if only_in_range and kind != KIND_IN_RANGE:
+            continue                       # 範囲外と自己ループを候補から外す
         fused = fuse(
             _st_value(day, pair, params), app_value(METHOD, day.app.get(pair)),
-            is_self_loop=candidate.is_self_loop, method=METHOD, params=params,
+            kind=kind, is_self_loop=candidate.is_self_loop,
+            method=METHOD, params=params,
         )
         if fused is not None:
             scored[pair] = fused[0]
@@ -423,3 +432,136 @@ def _best_for_out_of_range(scores: dict, kinds: dict, label: str = "") -> None:
           f" / self_loop {100*rate(best_out, KIND_SELF_LOOP):.0f}%"
           f" / IDF1 {scores[best_out]:.4f}"
           f"（IDF1 最良との差 {scores[best_out]-scores[best_idf1]:+.4f}）")
+
+
+# --------------------------------------------------------------------------
+# 種類ごとに融合の式を変える案
+# --------------------------------------------------------------------------
+
+
+def _kind_grid(no_match_score: float) -> list[dict[str, Any]]:
+    """α × k × 式の2通り。k は3種とも同じ値にする。
+
+    k を種類ごとに分けると軸が増えて式どうしの比較が読めなくなる。
+    ここで知りたいのは式の違いなので、k は1本にまとめる。
+    """
+    return [
+        {
+            "alpha": a, "alpha_self": a, "no_match_score": no_match_score,
+            "dwell_k_room": k, "dwell_k_no_room": k, "dwell_k_self": k,
+            "dwell_penalty_only": penalty,
+        }
+        for a, k, penalty in itertools.product(KIND_ALPHAS, KIND_KS, (False, True))
+    ]
+
+
+def run_kind_sweep(args, dates: list[str]) -> None:
+    """種類ごとに式を変えた場合と、現行の式を比べる。"""
+    print(f"{len(dates)} 日分を読み込み中...")
+    days = {date: _load_day(args, date) for date in dates}
+    no_match = float(getattr(args, "no_match_score", None) or 0.10)
+
+    grid = _kind_grid(no_match)
+    print(f"{len(grid)} 通り × {len(dates)} 日 を評価します（未対応 {no_match}）\n")
+
+    table: dict[tuple, float] = {}
+    kinds: dict[tuple, dict[str, tuple[int, int]]] = {}
+    for params in grid:
+        key = (params["alpha"], params["dwell_k_room"], params["dwell_penalty_only"])
+        idf1s, totals = [], collections.defaultdict(lambda: [0, 0])
+        for date in dates:
+            idf1, counts = _run(days[date], params)
+            idf1s.append(idf1)
+            for kind, (ok, total) in counts.items():
+                totals[kind][0] += ok
+                totals[kind][1] += total
+        table[key] = statistics.mean(idf1s)
+        kinds[key] = {k: tuple(v) for k, v in totals.items()}
+
+    _print_kind_report(table, kinds)
+    _print_in_range_only(days, dates, no_match)
+
+
+def _print_kind_report(table: dict, kinds: dict) -> None:
+    print("\n" + "=" * 92)
+    print("種類ごとに融合の式を変えた場合（手法⑥）")
+    print("=" * 92)
+    print("  現行  : すべて S = S_st^α × S_app^(1-α)")
+    print("  提案  : in_range は現行のまま / 範囲外・自己ループは S = c^α × S_app")
+
+    print(f"\n  {'α':>5}{'k':>6}{'式':>8}{'IDF1':>9}"
+          f"{'in_range':>12}{'out_of_range':>14}{'self_loop':>12}")
+    print("  " + "-" * 70)
+    for key in sorted(table, key=lambda k: (k[0], k[1], k[2])):
+        cells = ""
+        for kind, width in (
+            (KIND_IN_RANGE, 12), (KIND_OUT_OF_RANGE, 14), (KIND_SELF_LOOP, 12)
+        ):
+            ok, total = kinds[key].get(kind, (0, 0))
+            cells += f"{f'{ok}/{total} ({100*ok/max(1,total):.0f}%)':>{width}}"
+        label = "提案" if key[2] else "現行"
+        print(f"  {key[0]:>5}{key[1]:>6}{label:>8}{table[key]:>9.4f}{cells}")
+
+    print(f"\n  式の違いによる IDF1 の差（提案 - 現行）")
+    print(f"  {'α':>5}" + "".join(f"{f'k={k}':>9}" for k in KIND_KS))
+    print("  " + "-" * (5 + 9 * len(KIND_KS)))
+    for a in KIND_ALPHAS:
+        cells = ""
+        for k in KIND_KS:
+            now, new = table.get((a, k, False)), table.get((a, k, True))
+            cells += "        -" if now is None or new is None else f"{new - now:>+9.4f}"
+        print(f"  {a:>5}{cells}")
+
+    best = max(table, key=table.get)
+    print(f"\n  全体の最良: α={best[0]} / k={best[1]} / "
+          f"{'提案' if best[2] else '現行'}  IDF1 {table[best]:.4f}")
+    for penalty, label in ((False, "現行"), (True, "提案")):
+        subset = {k: v for k, v in table.items() if k[2] == penalty and k[0] > 0}
+        if subset:
+            b = max(subset, key=subset.get)
+            ok, total = kinds[b].get(KIND_OUT_OF_RANGE, (0, 0))
+            print(f"    α>0 での {label}の最良: α={b[0]} / k={b[1]}  IDF1 {subset[b]:.4f}"
+                  f"  out_of_range {ok}/{total} ({100*ok/max(1,total):.0f}%)")
+
+
+def _print_in_range_only(days: dict, dates: list[str], no_match: float) -> None:
+    """範囲外と自己ループを候補から除いた場合の α。
+
+    並列歩行の影響を受ける部分と受けない部分を分けたい。ここで α が 0 より
+    大きい側に最適値が出れば、時空間は「範囲内での順位付け」には効いている
+    ことになり、効かないのは定数で埋まる範囲外・自己ループのせいだと分かる。
+    """
+    print("\n" + "=" * 78)
+    print("in_range だけに絞った場合の α（範囲外と自己ループを候補から除く）")
+    print("=" * 78)
+    print(f"  {'α':>5}{'IDF1':>9}{'in_range の正解率':>20}")
+    print("  " + "-" * 40)
+
+    rows = []
+    for a in KIND_ALPHAS:
+        params = {
+            "alpha": a, "alpha_self": a, "no_match_score": no_match,
+            "in_range_only": True,
+        }
+        idf1s, ok, total = [], 0, 0
+        for date in dates:
+            idf1, counts = _run(days[date], params)
+            idf1s.append(idf1)
+            c_ok, c_total = counts.get(KIND_IN_RANGE, (0, 0))
+            ok += c_ok
+            total += c_total
+        rows.append((a, statistics.mean(idf1s), ok, total))
+
+    top = max(rows, key=lambda r: r[1])[0]
+    for a, idf1, ok, total in rows:
+        mark = "  ← 最大" if a == top else ""
+        print(f"  {a:>5}{idf1:>9.4f}"
+              f"{f'{ok}/{total} ({100*ok/max(1,total):.0f}%)':>20}{mark}")
+
+    if top == 0.0:
+        print("\n  並列歩行の影響を受けない in_range だけに絞っても α=0 が最良。"
+              "\n  時空間は範囲内の順位付けにも寄与していない。")
+    else:
+        print(f"\n  in_range だけに絞ると α={top} が最良。時空間は範囲内での"
+              "\n  順位付けには効いており、効かないのは定数で埋まる範囲外と"
+              "\n  自己ループが混ざるためだと分かる。")

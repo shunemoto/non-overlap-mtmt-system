@@ -143,3 +143,74 @@ def test_zero_scores_do_not_produce_infinities() -> None:
 
     assert score >= 0.0
     assert score < 1e-5
+
+
+# --- 種類ごとに式を変える（dwell_penalty_only） ---------------------------
+
+PENALTY = dict(PARAMS, dwell_penalty_only=True)
+
+
+def test_penalty_only_keeps_the_appearance_exponent_at_one() -> None:
+    """範囲外では S = c^α × S_app。外観の指数を下げない。"""
+    score, alpha = fuse(
+        0.04, 0.6, kind="out_of_range", is_self_loop=False, method=M6, params=PENALTY
+    )
+
+    assert alpha == pytest.approx(0.5)
+    assert score == pytest.approx(0.04**0.5 * 0.6)
+
+
+def test_penalty_only_applies_to_self_loops_too() -> None:
+    score, _ = fuse(
+        0.135, 0.8, kind="self_loop", is_self_loop=True, method=M6, params=PENALTY
+    )
+
+    assert score == pytest.approx(0.135**0.1 * 0.8)      # alpha_self=0.1
+
+
+def test_in_range_keeps_the_current_formula() -> None:
+    score, _ = fuse(
+        0.64, 0.49, kind="in_range", is_self_loop=False, method=M6, params=PENALTY
+    )
+
+    assert score == pytest.approx(0.56)                  # sqrt(0.64 * 0.49)
+
+
+def test_penalty_only_preserves_the_appearance_ranking() -> None:
+    """定数 c のもとでは、外観の順位がそのまま融合スコアの順位になる。"""
+    pairs = [(0.04, 0.3), (0.04, 0.6), (0.04, 0.5)]
+    scores = [
+        fuse(st, app, kind="out_of_range", is_self_loop=False,
+             method=M6, params=PENALTY)[0]
+        for st, app in pairs
+    ]
+
+    assert sorted(range(3), key=lambda i: scores[i]) == [0, 2, 1]
+    # 現行の式でも順位は同じだが、外観の差が (1-α) 乗で縮む
+    now = [
+        fuse(st, app, kind="out_of_range", is_self_loop=False,
+             method=M6, params=PARAMS)[0]
+        for st, app in pairs
+    ]
+    assert (scores[1] - scores[0]) > (now[1] - now[0])
+
+
+def test_penalty_only_is_inert_without_a_kind() -> None:
+    """種類が分からない候補では現行の式に戻す。"""
+    a, _ = fuse(0.64, 0.49, is_self_loop=False, method=M6, params=PENALTY)
+    b, _ = fuse(0.64, 0.49, is_self_loop=False, method=M6, params=PARAMS)
+
+    assert a == pytest.approx(b)
+
+
+def test_penalty_only_is_inert_at_the_alpha_extremes() -> None:
+    """α=0（外観のみ）と α=1（時空間のみ）では式の違いが出ない。"""
+    for params, method in (
+        (dict(PENALTY, alpha=0.0, alpha_self=0.0), M6),
+        (PENALTY, M3),
+    ):
+        new, _ = fuse(0.04, 0.6, kind="out_of_range", is_self_loop=False,
+                      method=method, params=params)
+        now, _ = fuse(0.04, 0.6, kind="out_of_range", is_self_loop=False,
+                      method=method, params=dict(params, dwell_penalty_only=False))
+        assert new == pytest.approx(now)

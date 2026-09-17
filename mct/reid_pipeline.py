@@ -140,8 +140,9 @@ def run_date(
         pair = (candidate.tgt, candidate.src)
         s_st = st_scores.get(pair)
         s_app = app_value(method, app_scores.get(pair))
+        kind = st_kinds.get(pair, KIND_SELF_LOOP if candidate.is_self_loop else None)
         fused = fuse(
-            s_st, s_app,
+            s_st, s_app, kind=kind,
             is_self_loop=candidate.is_self_loop, method=method, params=params,
         )
         if fused is None:
@@ -149,9 +150,7 @@ def run_date(
             continue
         scored[pair] = fused[0]
         detail[pair] = (s_st, s_app)
-        kinds[pair] = st_kinds.get(
-            pair, KIND_SELF_LOOP if candidate.is_self_loop else ""
-        )
+        kinds[pair] = kind or ""
     t2 = time.perf_counter()
 
     chosen = solve(tracks, scored, float(params["no_match_score"]))

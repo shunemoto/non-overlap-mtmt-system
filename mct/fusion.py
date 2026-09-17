@@ -22,6 +22,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from mct.spatiotemporal import KIND_IN_RANGE
+
 __all__ = [
     "EPS",
     "Method",
@@ -110,6 +112,7 @@ def fuse(
     is_self_loop: bool,
     method: Method,
     params: dict[str, Any],
+    kind: str | None = None,
 ) -> tuple[float, float] | None:
     """(融合スコア, 実際に使った α)。採点できなければ None。
 
@@ -117,6 +120,17 @@ def fuse(
     そもそも時空間を使わない（α=0）場合は、根拠が何も残らないので候補ごと
     落とす。無理に 0 を入れると「必ず未対応」という判断を暗黙に下すことに
     なり、候補が残っているのか落ちたのかを後から区別できなくなる。
+
+    `dwell_penalty_only` を立てると、範囲外と自己ループでは外観の指数を
+    1 のままにする。
+
+        in_range     : S = S_st^α × S_app^(1-α)
+        それ以外     : S = c^α × S_app
+
+    これらの種類では時空間尤度が定数 c なので、候補間の順位付けには一切
+    寄与しない。それなのに外観の指数を (1-α) に下げると、順位を決められる
+    唯一の根拠だけが弱められる。c^α は範囲内の候補と競合したときの
+    ペナルティとしてのみ働けばよい。
     """
     alpha = method_alpha(method, is_self_loop=is_self_loop, params=params)
 
@@ -131,4 +145,14 @@ def fuse(
 
     log_st = math.log(max(EPS, s_st)) if alpha > 0.0 else 0.0
     log_app = math.log(max(EPS, s_app)) if alpha < 1.0 else 0.0
+
+    # 外観が無い（α=1 に落ちた）候補では指数の取り方に違いが出ない
+    if (
+        params.get("dwell_penalty_only")
+        and kind is not None
+        and kind != KIND_IN_RANGE
+        and 0.0 < alpha < 1.0
+    ):
+        return math.exp(alpha * log_st + log_app), alpha
+
     return math.exp(alpha * log_st + (1.0 - alpha) * log_app), alpha

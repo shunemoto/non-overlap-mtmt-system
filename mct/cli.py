@@ -963,6 +963,11 @@ def cmd_reid_sweep(args: argparse.Namespace) -> int:
     from mct.reid_sweep import print_report, run_sweep
 
     dates = ALL_DATES if args.all_dates else [args.date]
+    if getattr(args, "kind_fusion", False):
+        from mct.reid_sweep import run_kind_sweep
+
+        run_kind_sweep(args, dates)
+        return 0
     run_sweep(args, dates, print_report)
     return 0
 
@@ -1310,7 +1315,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="c_dwell の k（居室 / 居室なし / 自己ループ）と α を振る",
     )
     p_rsw.add_argument(
-        "--no-match-score", type=float, help="--dwell のとき固定する未対応スコア"
+        "--kind-fusion", action="store_true",
+        help="種類ごとに融合の式を変える案と現行の式を比べる",
+    )
+    p_rsw.add_argument(
+        "--no-match-score", type=float,
+        help="--dwell / --kind-fusion のとき固定する未対応スコア",
     )
     p_rsw.set_defaults(func=cmd_reid_sweep)
 
