@@ -478,7 +478,11 @@ def cmd_calibrate_sigma(args: argparse.Namespace) -> int:
 def cmd_st_scores(args: argparse.Namespace) -> int:
     _resolve_out(args)
     from mct.candidate_pipeline import _spatiotemporal
-    from mct.spatiotemporal import KIND_IN_RANGE, estimate_sigma, score_candidates
+    from mct.config import load_cameras
+    from mct.spatiotemporal import (
+        KIND_IN_RANGE, build_dwell_table, dwell_constant, estimate_sigma,
+        score_candidates,
+    )
     from mct.st_pipeline import load_candidates, write_scores
     from mct.st_report import (
         Labelled, plot_separation, print_competitors, print_error_by_zone,
@@ -490,13 +494,23 @@ def cmd_st_scores(args: argparse.Namespace) -> int:
     calib_dates = [d for d in ALL_DATES if d != args.holdout_date]
     per_date, params = _sigma_samples(args, calib_dates)
     sigma, _, pooled = estimate_sigma(per_date, params)
-    print(f"  共通 σ = {pooled:.0f} フレーム / 個別推定 {len(sigma.per_zone)} ゾーン対\n")
+    dwell = build_dwell_table(load_cameras(args.config), params)
+    print(f"  共通 σ = {pooled:.0f} フレーム / 個別推定 {len(sigma.per_zone)} ゾーン対")
+    print("  c_dwell = exp(-k²/2): " + " / ".join(
+        f"{label} k={k} -> {dwell_constant(k):.3f}"
+        for label, k in (
+            ("居室", dwell.k_room), ("居室なし", dwell.k_no_room),
+            ("自己ループ", dwell.k_self),
+        )
+    ))
+    print(f"  居室につながる退出ゾーン: "
+          + ", ".join(f"{c}/{z}" for c, z in sorted(dwell.room_zones)) + "\n")
 
     labelled: list[Labelled] = []
     n_imputed = 0
     for date in dates:
         summaries, candidates, _ = load_candidates(date, args.out)
-        scores = score_candidates(candidates, summaries, sigma, params)
+        scores = score_candidates(candidates, summaries, sigma, params, dwell)
         dest = write_scores(date, args.out, scores, sigma, params)
 
         correct, _ = _correct_pairs_and_summaries(args, date, summaries)
@@ -1291,6 +1305,13 @@ def build_parser() -> argparse.ArgumentParser:
         "reid-sweep", help="融合パラメータを振って IDF1 を比べる（手法⑥）"
     )
     _add_appearance_args(p_rsw)
+    p_rsw.add_argument(
+        "--dwell", action="store_true",
+        help="c_dwell の k（居室 / 居室なし / 自己ループ）と α を振る",
+    )
+    p_rsw.add_argument(
+        "--no-match-score", type=float, help="--dwell のとき固定する未対応スコア"
+    )
     p_rsw.set_defaults(func=cmd_reid_sweep)
 
     p_eval = sub.add_parser("eval", help="Ground Truth と突き合わせて ID 指標を出す")

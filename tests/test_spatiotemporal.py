@@ -11,8 +11,10 @@ from mct.spatiotemporal import (
     KIND_IN_RANGE,
     KIND_OUT_OF_RANGE,
     KIND_SELF_LOOP,
+    DwellTable,
     SigmaEstimate,
     SigmaTable,
+    dwell_constant,
     collect_errors,
     estimate_sigma,
     predicted_arrival,
@@ -25,6 +27,8 @@ from mct.summarize import TrackSummary
 
 PARAMS = {"fps": 30, "sigma_min_samples": 5, "sigma_default_frames": 60}
 SIGMA = SigmaTable(default=60.0)
+DWELL = DwellTable(k_room=2.0, k_no_room=2.5, k_self=2.0,
+                   room_zones={("camB", "b_room")})
 
 
 def _route(distance=30.0, c_dwell=0.2, from_cam="camA", from_zone="a_out",
@@ -117,7 +121,7 @@ def test_error_of_one_sigma_gives_exp_minus_half() -> None:
     assert score.likelihood == pytest.approx(np.exp(-0.5))
 
 
-def test_out_of_range_uses_c_dwell() -> None:
+def test_out_of_range_uses_the_no_room_k() -> None:
     route = _route(c_dwell=0.25)
     tgt = _summary("camA", 1, 1.0, end=100)
     src = _summary("camB", 2, 1.0, start=9000)
@@ -128,11 +132,12 @@ def test_out_of_range_uses_c_dwell() -> None:
     )
 
     assert score.kind == KIND_OUT_OF_RANGE
-    assert score.likelihood == pytest.approx(0.25)
+    assert score.likelihood == pytest.approx(dwell_constant(DWELL.k_no_room))
     assert score.error_frames is None
 
 
-def test_self_loop_uses_c_dwell() -> None:
+def test_self_loop_uses_the_self_loop_k() -> None:
+    """c_dwell は transitions.yaml の値ではなく k から導出する。"""
     route = _route(c_dwell=0.3, to_cam="camA", to_zone="a_out")
     tgt = _summary("camA", 1, 1.0, end=100)
     src = _summary("camA", 2, 1.0, start=5000)
@@ -143,7 +148,7 @@ def test_self_loop_uses_c_dwell() -> None:
     )
 
     assert score.kind == KIND_SELF_LOOP
-    assert score.likelihood == pytest.approx(0.3)
+    assert score.likelihood == pytest.approx(dwell_constant(DWELL.k_self))
 
 
 def test_per_zone_sigma_is_used() -> None:
@@ -206,7 +211,7 @@ def test_kind_stays_in_range_without_speed() -> None:
     )
 
     assert score.kind == KIND_IN_RANGE
-    assert score.likelihood == pytest.approx(0.2)
+    assert score.likelihood == pytest.approx(dwell_constant(DWELL.k_no_room))
 
 
 def test_speed_medians() -> None:
@@ -444,3 +449,69 @@ def test_self_loop_ranks_report_both_tie_policies(capsys) -> None:
 
     assert "平均順位" in out and "同値を最下位とした順位" in out
     assert "最高値で同値だった正解: 1 件" in out
+
+
+# --- c_dwell を k から導出する ---------------------------------------------
+
+
+def test_dwell_constant_matches_the_gaussian_at_k_sigma() -> None:
+    """c = exp(-k²/2) は「範囲内で誤差 kσ だった候補」と同じ尤度になる。"""
+    assert dwell_constant(2.0) == pytest.approx(0.1353, abs=1e-4)
+    assert dwell_constant(2.5) == pytest.approx(0.0439, abs=1e-4)
+    assert dwell_constant(0.0) == pytest.approx(1.0)
+
+
+def test_room_zones_get_the_room_k() -> None:
+    route = _route(from_cam="camB", from_zone="b_room")
+
+    assert DWELL.k_for(route, is_self_loop=False) == DWELL.k_room
+
+
+def test_other_zones_get_the_no_room_k() -> None:
+    assert DWELL.k_for(_route(), is_self_loop=False) == DWELL.k_no_room
+
+
+def test_self_loop_k_wins_over_the_room_k() -> None:
+    """居室につながるゾーンでも、自己ループなら k_self を使う。"""
+    route = _route(from_cam="camB", from_zone="b_room")
+
+    assert DWELL.k_for(route, is_self_loop=True) == DWELL.k_self
+
+
+def test_dwell_without_a_route_falls_back_to_no_room() -> None:
+    assert DWELL.k_for(None, is_self_loop=False) == DWELL.k_no_room
+
+
+def test_room_zones_are_read_from_the_camera_config() -> None:
+    """room は自己ループの行き先にしか書かれていないが、その退出ゾーンから
+    他カメラへ向かう経路にも同じ猶予を与える。"""
+    from mct.config import CameraConfig, Region, TransitionTarget, TransitionZone
+    from mct.spatiotemporal import room_zones
+
+    region = Region(type="rect", points=[[0, 0], [10, 10]])
+    cameras = {
+        "camA": CameraConfig(name="camA", transition_zones=[
+            TransitionZone(id="a_to_b", region=region, to=[
+                TransitionTarget(cam="camB"),
+                TransitionTarget(cam="camA", room="design_room"),
+            ]),
+            TransitionZone(id="a_to_h", region=region, to=[
+                TransitionTarget(cam="camH"),
+            ]),
+        ]),
+    }
+
+    assert room_zones(cameras) == {("camA", "a_to_b")}
+
+
+def test_scores_use_the_given_dwell_table() -> None:
+    route = _route()
+    tgt = _summary("camA", 1, 1.0, end=100)
+    src = _summary("camB", 2, 1.0, start=9000)
+    table = DwellTable(k_room=1.0, k_no_room=1.0, k_self=1.0)
+
+    scores = score_candidates(
+        [_candidate(route, src, tgt, in_range=False)], [tgt, src], SIGMA, PARAMS, table
+    )
+
+    assert scores[0].likelihood == pytest.approx(dwell_constant(1.0))

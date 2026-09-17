@@ -24,6 +24,10 @@ from mct.summarize import TrackSummary, harmonic_mean_speed
 
 __all__ = [
     "KIND_IN_RANGE",
+    "DwellTable",
+    "dwell_constant",
+    "room_zones",
+    "build_dwell_table",
     "KIND_OUT_OF_RANGE",
     "KIND_SELF_LOOP",
     "STScore",
@@ -67,6 +71,78 @@ class STScore:
             "likelihood": self.likelihood,
             "speed_imputed": self.speed_imputed,
         }
+
+
+def dwell_constant(k: float) -> float:
+    """滞留・入室に当てる固定尤度。
+
+    `c = exp(-k² / 2)` は「探索時間範囲の中で誤差 kσ だった候補と同じ尤度」を
+    意味する。正解率の実測に合わせて極端に下げると、範囲外にいる正解が
+    常に負けてしまう。狙いは範囲内の下位候補と拮抗させることで、勝負は
+    外観で付けさせる。
+
+    σ はゾーン対ごとに校正してあるので、k で書けばゾーン対によって σ が
+    違っても「範囲内の何番手あたりと並ぶか」がそろう。
+    """
+    return float(np.exp(-(k ** 2) / 2.0))
+
+
+@dataclass
+class DwellTable:
+    """経路ごとの `c_dwell`。
+
+    `transitions.yaml` に書いた固定値は使わず、居室の有無から k を選んで
+    導出する。手で書いた値はゾーン対ごとにばらついていて（0.10〜0.30）、
+    「範囲内の何番手と並ぶか」がそろっていなかった。
+    """
+
+    k_room: float = 2.0
+    k_no_room: float = 2.5
+    k_self: float = 2.0
+    room_zones: set[tuple[str, str]] = field(default_factory=set)
+    """退出側が居室につながっている (camera, zone)。"""
+
+    def k_for(self, route: TransitionRoute | None, *, is_self_loop: bool) -> float:
+        if is_self_loop:
+            return self.k_self
+        if route is None:
+            return self.k_no_room
+        return (
+            self.k_room
+            if (route.from_cam, route.from_zone) in self.room_zones
+            else self.k_no_room
+        )
+
+    def get(self, route: TransitionRoute | None, *, is_self_loop: bool) -> float:
+        return dwell_constant(self.k_for(route, is_self_loop=is_self_loop))
+
+
+def room_zones(cameras: dict[str, Any]) -> set[tuple[str, str]]:
+    """居室につながっている退出ゾーン。
+
+    `room` が書かれているのは自己ループの行き先だけだが、それは
+    「このゾーンから出た人は居室に入り得る」ことを意味する。滞留して
+    探索時間の上限を超えるのは、まさにその居室に入った場合なので、
+    同じゾーンから他カメラへ向かう経路にも同じ猶予を与える。
+
+    ゾーン対そのものに room が付いた非自己ループの経路は存在しないため、
+    この解釈を採らないと `k_room` が一度も使われない。
+    """
+    out = set()
+    for name, camera in cameras.items():
+        for zone in getattr(camera, "transition_zones", []):
+            if any(t.room for t in zone.to):
+                out.add((name, zone.id))
+    return out
+
+
+def build_dwell_table(cameras: dict[str, Any], params: dict[str, Any]) -> DwellTable:
+    return DwellTable(
+        k_room=float(params.get("dwell_k_room", 2.0)),
+        k_no_room=float(params.get("dwell_k_no_room", 2.5)),
+        k_self=float(params.get("dwell_k_self", 2.0)),
+        room_zones=room_zones(cameras),
+    )
 
 
 @dataclass
@@ -127,6 +203,7 @@ def spatiotemporal_likelihood(
     params: dict[str, Any],
     medians: dict[str, float] | None = None,
     overall_median: float | None = None,
+    dwell: DwellTable | None = None,
 ) -> STScore:
     """1候補の時空間尤度。
 
@@ -135,7 +212,8 @@ def spatiotemporal_likelihood(
     """
     fps = float(params.get("fps", 30))
     route = candidate.route
-    c_dwell = route.c_dwell if route is not None else float(params.get("no_match_score", 0.1))
+    dwell = dwell or DwellTable()
+    c_dwell = dwell.get(route, is_self_loop=candidate.is_self_loop)
 
     if candidate.is_self_loop:
         return STScore(candidate.src, candidate.tgt, KIND_SELF_LOOP, c_dwell)
@@ -188,11 +266,12 @@ def score_candidates(
     summaries: list[TrackSummary],
     sigma: SigmaTable,
     params: dict[str, Any],
+    dwell: DwellTable | None = None,
 ) -> list[STScore]:
     by_key = {s.key: s for s in summaries}
     medians, overall = speed_medians(summaries)
     return [
-        spatiotemporal_likelihood(c, by_key, sigma, params, medians, overall)
+        spatiotemporal_likelihood(c, by_key, sigma, params, medians, overall, dwell)
         for c in candidates
     ]
 
