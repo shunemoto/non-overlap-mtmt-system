@@ -3,11 +3,13 @@
 視野が重複しない8台のカメラで撮影した映像から、カメラ間で同一人物を
 再同定（Multi-Target Multi-Camera Tracking）する研究システム。
 
-## 実装状況
+## システムの概要
 
-**フェーズ1: 1カメラ分の追跡と特徴保存まで。**
-カメラ間の再同定はまだ実装されていない。観測区間・遷移領域も未定義のため、
-検出された全トラックをフィルタせずに保存する。
+1. `track` で YOLO11 と BoT-SORT を使い、カメラごとに人物を追跡する。
+2. `filter` で観測区間を適用し、短いトラックや静止誤検出を除く。
+3. `candidates` で遷移領域、進行方向、カメラ間の接続関係から照合候補を作る。
+4. `st-scores` で移動時間などから時空間尤度を求め、`appearance` と `app-scores` で色ヒストグラムと SIFT による外観類似度を求める。
+5. `reid` でスコアを融合してトラックを対応付け、撮影日ごとの Global ID を割り当てる。正解データ（GT）と比較して IDF1 などを評価できる。
 
 ## ディレクトリ構成
 
@@ -19,11 +21,17 @@ mct/
   geometry.py        領域・角度の判定（追跡モデルに非依存）
   select.py          保存フレームの選抜（追跡モデルに非依存）
   track.py           追跡本体（2パス構成）
+  candidate_pipeline.py  トラックの要約と遷移候補の生成
+  st_pipeline.py     時空間スコアの入出力
+  appearance.py      外観記述子の生成
+  reid_pipeline.py   スコアの融合、割り当て、Global ID の統合
+  evaluation.py      正解データとの比較
   viz.py             可視化5種（追跡モデルを import しない）
   cli.py             コマンドラインエントリポイント
 configs/
   cameras.yaml       観測区間と遷移領域の定義
   transitions.yaml   カメラ間の移動時間（テンプレート）
+  transitions_calibrated.yaml  距離を校正済みの遷移設定（既定）
   params.yaml        追跡パラメータの既定値
 scripts/
   link_videos.py     元データへの symlink を data/videos/ に張る
@@ -36,8 +44,8 @@ outputs/             追跡結果・crop・mask（git 管理外）
 
 ## セットアップ
 
-Python 3.11 以上。**ネイティブ arm64 のインタプリタを使うこと。**
-anaconda の Python は x86_64 ビルドで Rosetta 動作になり、MPS の性能が出ない。
+Python 3.11 以上。以下は Apple Silicon での例。MPS を使う場合は
+ネイティブ arm64 の Python を使う。
 
 ```bash
 /opt/homebrew/bin/python3.12 -m venv .venv
@@ -54,7 +62,8 @@ python -m pip install -e ".[dev]"
 - **Apple Silicon (M1/M2/...)**: PyPI の既定ホイールがそのまま Metal (MPS) に
   対応しているので `pip install torch torchvision` でよい。CUDA は使えない。
 - **NVIDIA GPU 機**: <https://pytorch.org/get-started/locally/> の指示に従って
-  CUDA 版を入れ、`configs/params.yaml` の `device` を `"cuda"` にする。
+  CUDA 版を入れ、`configs/params.yaml` の `tracking.device` を `"cuda"` にする。
+- **CPU**: `configs/params.yaml` の `tracking.device` を `"cpu"` にする。
 
 確認:
 
@@ -65,18 +74,30 @@ python -c "import torch; print(torch.backends.mps.is_available())"   # Apple Sil
 MPS には未実装の演算が残っているため、`mct.track` は import 時に
 `PYTORCH_ENABLE_MPS_FALLBACK=1` を設定し、未対応演算を CPU に落とす。
 
-### 入力動画
+### 入力動画と正解データ
 
-`scripts/link_videos.py` が、元データ（日付ごとのフォルダに
-`0720_cameraA.mp4` の形式で置かれている）への symlink を
-`data/videos/{date}/{camera}.mp4` として張る。26 GB を複製せずに済む。
+撮影動画はクラウドで個別共有する。受け取った動画は
+`data/videos/{date}/{camera}.mp4`（例 `data/videos/0720/camA.mp4`）に配置する。
+元データが `<元データのルート>/<日付>/*_時刻同期/0720_cameraA.mp4` のような構成なら、
+ファイルを複製せずにシンボリックリンクで配置できる。
 
 ```bash
-python scripts/link_videos.py            # 既定: ~/Downloads/情報シンポ2026/シナリオ
-python scripts/link_videos.py /path/to/src
+python scripts/link_videos.py /path/to/source
 ```
 
+正解データの共有先は [non-overlap-mtmt-dataset](https://github.com/shunemoto/non-overlap-mtmt-dataset)。
+
+| ファイル | このシステムでの配置先 |
+| --- | --- |
+| カメラごとの MOT アノテーション | `data/gt/{date}/{camera}/gt.txt` |
+| Global ID 対応表（データセット側に追加予定） | `data/gt/globalID.csv` |
+
+対応表の列は `sequence_id,global_id,camera_id,local_track_id`。
+モデル重み、入力データ、生成した動画や追跡結果は Git の管理対象外。
+
 ## 使い方
+
+### 1カメラで動作を確認する
 
 ```bash
 # 1カメラ分の映像を追跡して outputs/ に結果を保存する
@@ -92,10 +113,34 @@ python -m mct.cli viz-density    --date 0720 --camera camA
 python -m mct.cli viz-endpoints  --date 0720 --camera camA
 ```
 
+### 研究データで再同定と評価を実行する
+
+全4撮影日分の動画と正解データを配置してから、リポジトリのルートで実行する。
+時空間スコアの計算は既定で4日分の正解遷移から到着時刻の誤差を推定する。
+同じ手順で特定の日をその推定から外すには、`st-scores` に `--holdout-date 0720` のように指定する。
+
+```bash
+for date in 0720 0727 0730 0803; do
+  for camera in camA camB camC camD camE camF camG camH; do
+    python -m mct.cli track --date "$date" --camera "$camera" || exit 1
+  done
+done
+
+python -m mct.cli filter --all-dates
+python -m mct.cli candidates --all-dates
+python -m mct.cli st-scores --all-dates
+python -m mct.cli appearance --all-dates
+python -m mct.cli app-scores --all-dates
+python -m mct.cli reid --all-dates
+```
+
+`reid` は既定で手法6を実行し、`outputs/{date}/global_ids_m6.json` に結果を書き出して、
+正解データとの比較結果を表示する。対応表の入手前でも、単一カメラの追跡と可視化を試せる。
+
 ### 可視化の使い分け
 
 観測区間と遷移領域はこれらの図を見て決めるので、目的ごとに図を分けている。
-いずれも `tracks.json` だけを読むので、追跡を再実行せずに描き直せる。
+追跡を再実行せずに描き直せる。`viz-video` と `viz-region` は元動画も使う。
 
 | コマンド | 出力 | 何を読むための図か |
 | --- | --- | --- |
@@ -263,8 +308,8 @@ crop はトラックごとに最大 `n_saved_per_track` 枚。マスクは crop 
 `crop_box` は bbox を `crop_padding_ratio` だけ広げ、画像端でクリップした
 実矩形なので bbox とは一致しない。
 
-`local_track_id` はカメラ内でのみ一意で、カメラをまたいだ同一性は
-今後の再同定フェーズで付与する。
+`local_track_id` はカメラ内でのみ一意。カメラをまたいだ対応と Global ID は
+`reid` の出力に記録する。
 
 Python からは `mct.schema` / `mct.io_utils` を使う。
 
